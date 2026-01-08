@@ -49,9 +49,9 @@ jobs:
 
       - name: Create cookies file
         env:
-          X_COOKIES: ${{ secrets.X_COOKIES }}
+          X_COOKIE: ${{ secrets.X_COOKIE }}
         run: |
-          echo "$X_COOKIES" > worker/x_cookies.json
+          echo "$X_COOKIE" > worker/x_cookies.json
 
       - name: Run search (scheduled)
         if: github.event_name == 'schedule'

@@ -409,8 +409,14 @@ def process_twitter_url(db: Database, tweet_url: str) -> bool:
         extracted_prompt = result.get("extracted_prompt", "")
         classification = result.get("classification") or {}
         images = result.get("images", [])
-        
+        prompt_location = result.get("prompt_location", "unknown")
+
         # 检查是否成功提取提示词
+        if extracted_prompt == "Prompt in reply":
+            print(f"   ⚠️ Prompt 在评论/回复中，主帖子不包含实际 prompt")
+            print(f"   [Info] 需要手动获取评论内容: {tweet_url}")
+            return False
+
         if not extracted_prompt or extracted_prompt == "No prompt found":
             print(f"   ⚠️ 未找到提示词")
             return False

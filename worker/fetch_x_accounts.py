@@ -815,6 +815,14 @@ async def process_tweet(db: Database, tweet: Dict, state: Dict,
         print(f"   [AI] Extracting prompt...")
         extracted_prompt = extract_prompt_with_ai(text, model=AI_MODEL)
 
+        # 处理 "Prompt 在评论中" 的情况
+        if extracted_prompt == "Prompt in reply":
+            print(f"   [Skip] Prompt is in comment/reply (not in main post)")
+            print(f"   [Info] URL: {tweet_url}")
+            mark_tweet_processed(state, tweet_id)
+            # 返回特殊值表示 prompt 在评论中
+            return "prompt_in_reply"
+
         if not extracted_prompt or extracted_prompt == "No prompt found":
             print(f"   [Skip] AI found no prompt")
             mark_tweet_processed(state, tweet_id)
@@ -912,6 +920,7 @@ async def monitor_accounts(
         "tweets_found": 0,
         "filtered_stage1": 0,  # 第一阶段过滤 (特征匹配)
         "filtered_stage2": 0,  # 第二阶段过滤 (AI 提取失败)
+        "prompt_in_reply": 0,  # Prompt 在评论中
         "prompts_saved": 0,
         "errors": 0,
     }
@@ -940,6 +949,8 @@ async def monitor_accounts(
                         stats["filtered_stage1"] += 1
                     elif result == "filtered_stage2":
                         stats["filtered_stage2"] += 1
+                    elif result == "prompt_in_reply":
+                        stats["prompt_in_reply"] += 1
                     elif result is True:
                         stats["prompts_saved"] += 1
 
@@ -965,6 +976,7 @@ async def monitor_accounts(
     print(f"Tweets found: {stats['tweets_found']}")
     print(f"  ├─ Stage 1 filtered (no keywords): {stats['filtered_stage1']}")
     print(f"  ├─ Stage 2 filtered (AI no prompt): {stats['filtered_stage2']}")
+    print(f"  ├─ Prompt in reply (skipped): {stats['prompt_in_reply']}")
     print(f"  └─ Prompts saved: {stats['prompts_saved']}")
     print(f"Errors: {stats['errors']}")
     print("=" * 60)

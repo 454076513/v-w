@@ -5,7 +5,7 @@ Twitter/X Content Fetcher
 
 使用方法:
     python fetch_twitter_content.py <tweet_url>
-    
+
 示例:
     python fetch_twitter_content.py https://x.com/oggii_0/status/2001232399368380637
 """
@@ -15,6 +15,21 @@ import sys
 import os
 import requests
 from urllib.parse import urlparse
+from pathlib import Path
+
+# 加载环境变量
+try:
+    from dotenv import load_dotenv
+    root_dir = Path(__file__).parent.parent
+    env_local = root_dir / ".env.local"
+    env_file = root_dir / ".env"
+
+    if env_local.exists():
+        load_dotenv(env_local)
+    elif env_file.exists():
+        load_dotenv(env_file)
+except ImportError:
+    pass
 
 # 可选依赖
 try:
@@ -30,200 +45,216 @@ except ImportError:
     HAS_PLAYWRIGHT = False
 
 
-# Pollinations API 配置
-POLLINATIONS_API_URL = "https://text.pollinations.ai/"
-DEFAULT_MODEL = "openai"  # 免费模型，也可以使用 "deepseek" (需要 seed tier)
+# 导入公用模块
+from prompt_utils import (
+    extract_prompt,
+    extract_prompt_regex,
+    extract_prompt_simple,
+    classify_prompt,
+    detect_prompt_in_reply,
+    call_ai,
+    DEFAULT_MODEL,
+)
 
-# Gitee AI API 配置 (fallback)
-GITEE_AI_API_URL = "https://ai.gitee.com/v1/chat/completions"
-GITEE_AI_MODEL = "DeepSeek-V3"
-GITEE_AI_API_KEY = os.environ.get("GITEE_AI_API_KEY", "")
+# Twitter Cookies 配置 (用于获取评论)
+import json
 
-
-def _call_gitee_ai(messages: list) -> str:
-    """
-    调用 Gitee AI API (fallback)，使用 stream 模式避免超时
-    
-    Args:
-        messages: OpenAI 格式的消息列表
-    
-    Returns:
-        AI 响应内容
-    """
-    import json
-    
-    if not GITEE_AI_API_KEY:
-        raise Exception("GITEE_AI_API_KEY 环境变量未设置")
-    
-    headers = {
-        'Content-Type': 'application/json',
-        'Authorization': f'Bearer {GITEE_AI_API_KEY}',
-        'Accept': 'text/event-stream',
-    }
-    
-    payload = {
-        "model": GITEE_AI_MODEL,
-        "messages": messages,
-        "temperature": 0.7,
-        "stream": True,  # 启用流式输出
-    }
-    
-    # 使用 stream=True 避免读取超时
-    response = requests.post(
-        GITEE_AI_API_URL, 
-        json=payload, 
-        headers=headers, 
-        timeout=(10, 300),  # (连接超时, 读取超时)
-        stream=True
-    )
-    
-    if response.status_code != 200:
-        raise Exception(f"Gitee AI 请求失败: {response.status_code} - {response.text}")
-    
-    # 收集流式响应
-    full_content = []
-    
-    for line in response.iter_lines():
-        if not line:
-            continue
-        
-        line = line.decode('utf-8')
-        
-        # SSE 格式: "data: {...}"
-        if line.startswith('data: '):
-            data_str = line[6:]  # 去掉 "data: " 前缀
-            
-            # 结束标记
-            if data_str == '[DONE]':
-                break
-            
-            try:
-                data = json.loads(data_str)
-                if "choices" in data and len(data["choices"]) > 0:
-                    delta = data["choices"][0].get("delta", {})
-                    content = delta.get("content", "")
-                    if content:
-                        full_content.append(content)
-            except json.JSONDecodeError:
-                continue
-    
-    if not full_content:
-        raise Exception("Gitee AI 返回空响应")
-    
-    return "".join(full_content)
+COOKIES_FILE = Path(__file__).parent / "x_cookies.json"
+X_COOKIE = os.environ.get("X_COOKIE", "")  # JSON 字符串: '{"auth_token": "xxx", "ct0": "xxx"}'
 
 
-def _call_pollinations_ai(messages: list, model: str = DEFAULT_MODEL) -> str:
-    """
-    调用 Pollinations AI API
-
-    Args:
-        messages: OpenAI 格式的消息列表
-        model: 使用的模型
-
-    Returns:
-        AI 响应内容
-    """
-    # 确保 model 不为空
-    if not model or not model.strip():
-        model = DEFAULT_MODEL
-
-    headers = {
-        'Content-Type': 'application/json',
-    }
-
-    payload = {
-        "model": model,
-        "messages": messages,
-    }
-    
-    response = requests.post(POLLINATIONS_API_URL, json=payload, headers=headers, timeout=60)
-    
-    if response.status_code == 200:
-        # 响应可能是纯文本或 JSON
-        import json as json_module
-        
+def _load_twitter_cookies() -> dict:
+    """加载 Twitter cookies"""
+    # 优先使用环境变量
+    if X_COOKIE:
         try:
-            data = response.json()
-            if isinstance(data, dict):
-                # OpenAI 格式: {"choices": [{"message": {"content": "..."}}]}
-                if "choices" in data:
-                    return data["choices"][0]["message"]["content"]
-                # 简化格式: {"content": "..."}
-                elif "content" in data:
-                    return data["content"]
-                elif "reasoning_content" in data:
-                    return data["reasoning_content"]
-                else:
-                    # 如果返回的是直接的 JSON 对象（比如分类结果），转回 JSON 字符串
-                    return json_module.dumps(data, ensure_ascii=False)
-            elif isinstance(data, str):
-                return data
-            else:
-                return json_module.dumps(data, ensure_ascii=False)
+            return json.loads(X_COOKIE)
         except:
-            # 纯文本响应
-            return response.text.strip()
-    else:
-        raise Exception(f"Pollinations API 请求失败: {response.status_code} - {response.text}")
+            pass
+
+    # 从文件加载
+    if COOKIES_FILE.exists():
+        try:
+            with open(COOKIES_FILE) as f:
+                return json.load(f)
+        except:
+            pass
+
+    return {}
 
 
-def _call_ai_with_fallback(messages: list, model: str = DEFAULT_MODEL) -> str:
+# ========== 以下函数已移至 prompt_utils.py ==========
+# - extract_prompt_from_text -> prompt_utils.extract_prompt_regex
+# - detect_prompt_in_reply -> prompt_utils.detect_prompt_in_reply
+# - extract_prompt_with_ai -> prompt_utils.extract_prompt
+# - classify_prompt_with_ai -> prompt_utils.classify_prompt
+# - _call_ai_with_fallback -> prompt_utils.call_ai
+# - _call_pollinations_ai, _call_gitee_ai (内部函数)
+
+
+def fetch_author_replies(tweet_id: str, author_username: str) -> list:
     """
-    调用 AI API，如果 Pollinations 失败则 fallback 到 Gitee AI
-    
+    使用独立子进程获取作者对自己帖子的回复
+    通过子进程调用避免连接池问题
+
     Args:
-        messages: OpenAI 格式的消息列表
-        model: Pollinations 使用的模型
-    
+        tweet_id: 推文 ID
+        author_username: 原始作者用户名
+
     Returns:
-        AI 响应内容
+        作者回复列表，每个元素包含 {"text": "...", "is_author": True}
     """
-    # 首先尝试 Pollinations AI
+    import subprocess
+
+    # 检查 cookies 是否存在
+    cookies = _load_twitter_cookies()
+    if not cookies:
+        print("      ⚠️ 未配置 Twitter cookies，无法获取评论")
+        return []
+
+    auth_token = cookies.get("auth_token", "")
+    ct0 = cookies.get("ct0", "")
+
+    if not auth_token or not ct0:
+        print("      ⚠️ Twitter cookies 缺少 auth_token 或 ct0")
+        return []
+
+    # 使用子进程调用独立脚本，避免连接池问题
+    script_path = Path(__file__).parent / "fetch_replies.py"
+
     try:
-        result = _call_pollinations_ai(messages, model)
-        return result
-    except Exception as pollinations_error:
-        print(f"⚠️ Pollinations AI 失败: {pollinations_error}")
-        
-        # Fallback 到 Gitee AI
-        if GITEE_AI_API_KEY:
-            print(f"🔄 尝试 Gitee AI (DeepSeek-V3) 作为 fallback...")
-            try:
-                result = _call_gitee_ai(messages)
-                print("✓ Gitee AI 调用成功")
-                return result
-            except Exception as gitee_error:
-                print(f"✗ Gitee AI 也失败: {gitee_error}")
-                raise Exception(f"所有 AI 服务都失败: Pollinations ({pollinations_error}), Gitee ({gitee_error})")
+        result = subprocess.run(
+            [sys.executable, str(script_path), tweet_id, author_username],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+
+        if result.returncode == 0 and result.stdout.strip():
+            replies = json.loads(result.stdout.strip())
+            return replies
         else:
-            print("⚠️ GITEE_AI_API_KEY 未设置，无法使用 fallback")
-            raise pollinations_error
+            if result.stderr:
+                print(f"      ⚠️ 子进程错误: {result.stderr[:200]}")
+            return []
+
+    except subprocess.TimeoutExpired:
+        print("      ⚠️ 获取评论超时")
+        return []
+    except json.JSONDecodeError as e:
+        print(f"      ⚠️ 解析回复失败: {e}")
+        return []
+    except Exception as e:
+        print(f"      ⚠️ 获取评论失败: {e}")
+        return []
+
+
+# 检测 "prompt 在评论中" 的指示符模式 (已移至 prompt_utils.py)
+PROMPT_IN_REPLY_PATTERNS = [
+    r'prompt\s*[👇⬇️↓🔽]',          # "Prompt👇", "prompt ⬇️"
+    r'[👇⬇️↓🔽]\s*prompt',          # "👇prompt"
+    r'prompt\s+below',              # "prompt below"
+    r'prompt\s+in\s+(the\s+)?(comment|reply|replies|thread)',  # "prompt in comment"
+    r'check\s+(the\s+)?(comment|reply|replies)',  # "check the comment"
+    r'see\s+(the\s+)?(comment|reply|replies)',    # "see comment"
+    r'(comment|reply|replies)\s+for\s+prompt',    # "comment for prompt"
+    r'full\s+prompt\s+[👇⬇️↓🔽]',   # "full prompt 👇"
+    r'提示词\s*[👇⬇️↓🔽]',           # 中文: "提示词👇"
+    r'[👇⬇️↓🔽]\s*提示词',           # 中文: "👇提示词"
+]
+
+
+def extract_prompt_from_text(text: str) -> str:
+    """
+    尝试使用正则表达式从文本中提取 prompt
+    用于快速提取格式规范的 prompt，避免 AI 调用
+
+    Args:
+        text: 推文或回复文本
+
+    Returns:
+        提取的 prompt 或 None
+    """
+    if not text:
+        return None
+
+    # 常见的 prompt 引导模式
+    patterns = [
+        # 👉Prompt: ... 或 Prompt: ...
+        r'(?:👉\s*)?[Pp]rompt[:\s]+(.+)',
+        # "prompt" 后面跟着换行和内容
+        r'[Pp]rompt\s*\n+(.+)',
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+        if match:
+            prompt = match.group(1).strip()
+            # 清理开头的引号、括号等
+            prompt = re.sub(r'^[\"\'\[\(]+', '', prompt)
+            # 如果 prompt 足够长，认为是有效的
+            if len(prompt) > 50:
+                return prompt
+
+    return None
+
+
+def detect_prompt_in_reply(text: str) -> bool:
+    """
+    检测推文文本是否表明 prompt 在评论/回复中
+
+    Args:
+        text: 推文正文内容
+
+    Returns:
+        True 如果检测到 prompt 可能在评论中
+    """
+    if not text:
+        return False
+
+    text_lower = text.lower()
+
+    for pattern in PROMPT_IN_REPLY_PATTERNS:
+        if re.search(pattern, text_lower, re.IGNORECASE):
+            return True
+
+    return False
 
 
 def extract_prompt_with_ai(text: str, model: str = DEFAULT_MODEL) -> str:
     """
     使用 AI API 从文本中提取提示词
     优先使用 Pollinations AI，失败后 fallback 到 Gitee AI (DeepSeek-V3)
-    
+
     Args:
         text: 推文正文内容
         model: 使用的模型，默认 openai，可选 deepseek
-    
+
     Returns:
-        提取出的提示词
+        提取出的提示词，如果 prompt 在评论中返回 'Prompt in reply'
     """
+    # 首先检测是否是 "prompt 在评论中" 的情况
+    if detect_prompt_in_reply(text):
+        return "Prompt in reply"
+
     messages = [
         {
             "role": "system",
-            "content": "You are a helpful assistant that extracts AI image generation prompts from text. Extract only the prompt itself, without any additional explanation or formatting. If no prompt is found, return 'No prompt found'."
+            "content": """You are a helpful assistant that extracts AI image generation prompts from text.
+
+IMPORTANT RULES:
+1. Extract only the actual prompt itself, without any additional explanation or formatting.
+2. If the text contains indicators like "Prompt👇", "prompt below", "check comment", "prompt in reply" etc., it means the actual prompt is in a reply/comment, not in the main post. In this case, return 'Prompt in reply'.
+3. If the text only contains a title or description of what the image shows (like "Nano Banana prompt" or "Any person to Trash Pop Collage") but NOT the actual detailed prompt, return 'No prompt found'.
+4. A real prompt usually contains detailed descriptions, style parameters (like --ar, --v), or specific technical terms.
+5. If no actual prompt is found, return 'No prompt found'."""
         },
         {
             "role": "user",
             "content": f"Extract the AI image generation prompt from this text and return only the prompt itself:\n\n{text}"
         }
     ]
-    
+
     try:
         return _call_ai_with_fallback(messages, model)
     except requests.exceptions.Timeout:
@@ -812,23 +843,109 @@ def fetch_tweet(url: str, download_images: bool = True, output_dir: str = ".",
     if extract_prompt and result.get("text"):
         print()
         print(f"   🤖 AI 处理 (模型: {ai_model})")
-        
+
+        # 先检测是否是 "prompt 在评论中" 的情况
+        prompt_in_reply = detect_prompt_in_reply(result["text"])
+        if prompt_in_reply:
+            print(f"      ⚠️ 检测到 prompt 可能在评论/回复中")
+            result["prompt_location"] = "reply"
+        else:
+            result["prompt_location"] = "post"
+
         # 提取提示词
         print(f"      [1/2] 提取提示词...")
         try:
             extracted_prompt = extract_prompt_with_ai(result["text"], model=ai_model)
             result["extracted_prompt"] = extracted_prompt
-            
-            if extracted_prompt and extracted_prompt != "No prompt found":
+
+            # 处理不同的提取结果
+            if extracted_prompt == "Prompt in reply":
+                print(f"      ⚠️ Prompt 在评论/回复中，尝试获取作者回复...")
+                result["prompt_location"] = "reply"
+
+                # 尝试获取作者的回复
+                # 优先使用 API 返回的实际作者用户名（URL 中的用户名可能不准确）
+                actual_author = result.get("user", {}).get("screen_name", username)
+                if actual_author != username:
+                    print(f"      ℹ️ 实际作者: @{actual_author} (URL 中: @{username})")
+                author_replies = fetch_author_replies(tweet_id, actual_author)
+                if author_replies:
+                    print(f"      ✓ 获取到 {len(author_replies)} 条作者回复")
+
+                    # 合并所有作者回复，从中提取 prompt
+                    combined_reply_text = "\n\n".join([r["text"] for r in author_replies])
+                    result["author_replies"] = author_replies
+
+                    # 尝试从回复中提取 prompt
+                    print(f"      [1.5/2] 从作者回复中提取提示词...")
+
+                    # 首先尝试正则表达式提取 (更快更可靠)
+                    reply_prompt = None
+                    for reply in author_replies:
+                        reply_prompt = extract_prompt_from_text(reply["text"])
+                        if reply_prompt:
+                            print(f"      ✓ 使用正则表达式提取成功")
+                            break
+
+                    # 如果正则没有提取到，尝试 AI 提取
+                    if not reply_prompt:
+                        print(f"      ℹ️ 正则未匹配，尝试 AI 提取...")
+                        try:
+                            # 直接调用 AI 提取，不再检测 "Prompt in reply"
+                            reply_prompt = _call_ai_with_fallback([
+                                {
+                                    "role": "system",
+                                    "content": "You are a helpful assistant that extracts AI image generation prompts from text. Extract only the prompt itself, without any additional explanation or formatting. If no prompt is found, return 'No prompt found'."
+                                },
+                                {
+                                    "role": "user",
+                                    "content": f"Extract the AI image generation prompt from this text and return only the prompt itself:\n\n{combined_reply_text}"
+                                }
+                            ], ai_model)
+
+                            if reply_prompt == "No prompt found":
+                                reply_prompt = None
+                        except Exception as e:
+                            print(f"      ⚠️ AI 提取失败: {e}")
+                            reply_prompt = None
+
+                    if reply_prompt:
+                        extracted_prompt = reply_prompt
+                        result["extracted_prompt"] = extracted_prompt
+                        result["prompt_location"] = "reply"  # 标记是从回复中提取的
+                        prompt_preview = extracted_prompt[:80].replace("\n", " ")
+                        print(f"      ✓ 从回复中提取成功: {prompt_preview}...")
+
+                        # 对提取的提示词进行分类
+                        print(f"      [2/2] 分类提示词...")
+                        try:
+                            classification = classify_prompt_with_ai(extracted_prompt, model=ai_model)
+                            result["classification"] = classification
+
+                            title = classification.get("title", "未知")
+                            category = classification.get("category", "未知")
+                            confidence = classification.get("confidence", "未知")
+                            print(f"      ✓ 分类成功: {title} | {category} | 置信度: {confidence}")
+                        except Exception as e:
+                            print(f"      ✗ 分类失败: {e}")
+                            result["classification"] = None
+                    else:
+                        print(f"      ⚠️ 作者回复中也未找到提示词")
+                        result["classification"] = None
+                else:
+                    print(f"      ⚠️ 未获取到作者回复 (可能需要配置 cookies)")
+                    result["classification"] = None
+            elif extracted_prompt and extracted_prompt != "No prompt found":
                 prompt_preview = extracted_prompt[:80].replace("\n", " ")
                 print(f"      ✓ 提取成功: {prompt_preview}...")
-                
+                result["prompt_location"] = "post"
+
                 # 对提取的提示词进行分类
                 print(f"      [2/2] 分类提示词...")
                 try:
                     classification = classify_prompt_with_ai(extracted_prompt, model=ai_model)
                     result["classification"] = classification
-                    
+
                     title = classification.get("title", "未知")
                     category = classification.get("category", "未知")
                     confidence = classification.get("confidence", "未知")
@@ -843,23 +960,46 @@ def fetch_tweet(url: str, download_images: bool = True, output_dir: str = ".",
             print(f"      ✗ 提取失败: {e}")
             result["extracted_prompt"] = None
             result["classification"] = None
-    
+
     # 完成
     elapsed = (datetime.now() - start_time).total_seconds()
     print()
-    print(f"✅ [SUCCESS] 推文处理完成: {url}")
-    print(f"   用户: @{username} | 推文ID: {tweet_id}")
-    print(f"   获取方式: {fetch_method}")
-    print(f"   图片数量: {len(result.get('images', []))}")
-    if result.get("extracted_prompt") and result["extracted_prompt"] != "No prompt found":
-        print(f"   提示词: 已提取")
+    prompt_location = result.get("prompt_location", "unknown")
+    extracted_prompt = result.get("extracted_prompt", "")
+
+    # 判断是否成功提取了 prompt (即使是从评论中提取的)
+    has_valid_prompt = extracted_prompt and extracted_prompt not in ["No prompt found", "Prompt in reply"]
+
+    if has_valid_prompt:
+        if prompt_location == "reply":
+            print(f"✅ [SUCCESS_FROM_REPLY] 推文处理完成: {url}")
+            print(f"   用户: @{username} | 推文ID: {tweet_id}")
+            print(f"   获取方式: {fetch_method}")
+            print(f"   图片数量: {len(result.get('images', []))}")
+            print(f"   提示词: 已从评论中提取")
+        else:
+            print(f"✅ [SUCCESS] 推文处理完成: {url}")
+            print(f"   用户: @{username} | 推文ID: {tweet_id}")
+            print(f"   获取方式: {fetch_method}")
+            print(f"   图片数量: {len(result.get('images', []))}")
+            print(f"   提示词: 已提取")
         if result.get("classification"):
             print(f"   分类: {result['classification'].get('category', '未知')}")
+    elif prompt_location == "reply":
+        print(f"⚠️ [PROMPT_IN_REPLY] 推文处理完成: {url}")
+        print(f"   用户: @{username} | 推文ID: {tweet_id}")
+        print(f"   获取方式: {fetch_method}")
+        print(f"   图片数量: {len(result.get('images', []))}")
+        print(f"   提示词位置: 评论/回复中 (未能提取)")
     else:
+        print(f"⚠️ [NO_PROMPT] 推文处理完成: {url}")
+        print(f"   用户: @{username} | 推文ID: {tweet_id}")
+        print(f"   获取方式: {fetch_method}")
+        print(f"   图片数量: {len(result.get('images', []))}")
         print(f"   提示词: 未找到")
     print(f"   耗时: {elapsed:.1f}s")
     print("=" * 70)
-    
+
     return result
 
 
