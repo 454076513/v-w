@@ -1,0 +1,60 @@
+name: Export Cache
+
+on:
+  workflow_dispatch:
+    inputs:
+      cache_type:
+        description: "要导出的缓存类型"
+        required: true
+        type: choice
+        options:
+          - opennana
+          - youmind
+          - all
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create cache directory
+        run: mkdir -p worker/cache
+
+      - name: Restore OpenNana cache
+        if: inputs.cache_type == 'opennana' || inputs.cache_type == 'all'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            worker/cache/import_progress.json
+            worker/cache/prompts.json
+          key: opennana-progress-
+          restore-keys: opennana-progress-
+
+      - name: Restore YouMind cache
+        if: inputs.cache_type == 'youmind' || inputs.cache_type == 'all'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            worker/cache/youmind_import_progress.json
+            worker/cache/youmind_prompts.json
+          key: youmind-progress-
+          restore-keys: youmind-progress-
+
+      - name: Show cache contents
+        run: |
+          echo "## Cache Contents" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          ls -lah worker/cache/ >> $GITHUB_STEP_SUMMARY 2>&1 || echo "No cache files found"
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          if [ -d worker/cache ]; then
+            echo "缓存文件:"
+            ls -lah worker/cache/
+          fi
+
+      - name: Upload as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.cache_type }}-cache-export
+          path: worker/cache/
+          if-no-files-found: warn
+          retention-days: 7

@@ -1,0 +1,145 @@
+name: Import AIART.PICS to Database
+
+on:
+  schedule:
+    # 每天 UTC 8:00 (北京时间 16:00) 运行
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+    inputs:
+      pages:
+        description: "爬取页数 (默认: 2)"
+        required: false
+        type: number
+        default: 2
+      limit:
+        description: "导入数量限制 (0 = 无限制)"
+        required: false
+        type: number
+        default: 0
+      dry_run:
+        description: "预览模式 (不写入数据库)"
+        required: false
+        type: boolean
+        default: false
+      reset:
+        description: "重置进度从头开始"
+        required: false
+        type: boolean
+        default: false
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  import-to-db:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+          cache-dependency-path: "worker/requirements.txt"
+
+      - name: Install dependencies
+        run: |
+          cd worker
+          pip install -r requirements.txt
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install chromium
+
+      - name: Ensure cache directory exists
+        run: mkdir -p worker/cache
+
+      - name: Restore progress cache
+        uses: actions/cache@v4
+        with:
+          path: worker/cache/aiart_pics_import_progress.json
+          key: aiart-pics-import-progress
+          restore-keys: |
+            aiart-pics-import-progress
+
+      - name: Show progress
+        run: |
+          if [ -f worker/cache/aiart_pics_import_progress.json ]; then
+            PROCESSED=$(python3 -c "import json; print(len(json.load(open('worker/cache/aiart_pics_import_progress.json')).get('processed_slugs', [])))" 2>/dev/null || echo "0")
+            echo "📊 已处理: $PROCESSED 条"
+          else
+            echo "📊 进度文件不存在，将从头开始"
+          fi
+
+      - name: Run import
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          cd worker
+
+          # 构建参数
+          ARGS=""
+
+          # 页数参数
+          PAGES="${{ inputs.pages }}"
+          if [ -z "$PAGES" ]; then
+            PAGES="2"
+          fi
+          ARGS="$ARGS --pages $PAGES"
+
+          if [ "${{ inputs.limit }}" != "0" ] && [ -n "${{ inputs.limit }}" ]; then
+            ARGS="$ARGS --limit ${{ inputs.limit }}"
+          fi
+
+          if [ "${{ inputs.dry_run }}" == "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+
+          if [ "${{ inputs.reset }}" == "true" ]; then
+            ARGS="$ARGS --reset"
+          fi
+
+          echo "🚀 运行: python import_aiart_pics.py $ARGS"
+          python import_aiart_pics.py $ARGS
+
+      - name: Save progress cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: worker/cache/aiart_pics_import_progress.json
+          key: aiart-pics-import-progress
+
+      - name: Upload failed items
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: import-failed-${{ github.run_id }}
+          path: worker/failed_imports/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Show summary
+        if: always()
+        run: |
+          echo "## AIART.PICS Import Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f worker/cache/aiart_pics_import_progress.json ]; then
+            PROCESSED=$(python3 -c "import json; print(len(json.load(open('worker/cache/aiart_pics_import_progress.json')).get('processed_slugs', [])))" 2>/dev/null || echo "0")
+            LAST_UPDATE=$(python3 -c "import json; print(json.load(open('worker/cache/aiart_pics_import_progress.json')).get('last_updated', 'N/A'))" 2>/dev/null || echo "N/A")
+            echo "### Progress" >> $GITHUB_STEP_SUMMARY
+            echo "- Processed: **$PROCESSED** slugs" >> $GITHUB_STEP_SUMMARY
+            echo "- Last updated: $LAST_UPDATE" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Parameters" >> $GITHUB_STEP_SUMMARY
+          echo "- Pages: ${{ inputs.pages || '2' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Limit: ${{ inputs.limit || 'unlimited' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Dry run: ${{ inputs.dry_run }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Reset: ${{ inputs.reset }}" >> $GITHUB_STEP_SUMMARY

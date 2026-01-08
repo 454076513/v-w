@@ -1,0 +1,119 @@
+name: Import OpenNana Data
+
+on:
+  schedule:
+    # 每天北京时间 01:00 运行（UTC 17:00）
+    - cron: "0 17 * * *"
+  workflow_dispatch: # 允许手动触发
+    inputs:
+      limit:
+        description: "限制导入数量（留空则不限制）"
+        required: false
+        type: number
+      skip_twitter:
+        description: "跳过 Twitter 处理"
+        required: false
+        type: boolean
+        default: false
+      only_twitter:
+        description: "仅处理有 X 来源的条目"
+        required: false
+        type: boolean
+        default: true
+      refresh:
+        description: "强制刷新缓存"
+        required: false
+        type: boolean
+        default: false
+      reset:
+        description: "重置进度，从头开始"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: "worker/requirements.txt"
+
+      - name: Cache progress and data files
+        uses: actions/cache@v4
+        with:
+          path: |
+            worker/cache/import_progress.json
+            worker/cache/prompts.json
+          key: opennana-progress-${{ github.run_id }}
+          restore-keys: |
+            opennana-progress-
+
+      - name: Ensure cache directory exists
+        run: |
+          mkdir -p worker/cache
+          mkdir -p worker/failed_imports
+
+      - name: Install dependencies
+        run: |
+          cd worker
+          pip install -r requirements.txt
+
+      - name: Run import (scheduled)
+        if: github.event_name == 'schedule'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GITEE_AI_API_KEY: ${{ secrets.GITEE_AI_API_KEY }}
+        run: |
+          cd worker
+          python import_opennana.py --only-twitter --limit 50 --refresh
+
+      - name: Run import (manual)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GITEE_AI_API_KEY: ${{ secrets.GITEE_AI_API_KEY }}
+        run: |
+          cd worker
+          python import_opennana.py \
+            ${{ inputs.only_twitter && '--only-twitter' || '' }} \
+            ${{ inputs.skip_twitter && '--skip-twitter' || '' }} \
+            ${{ inputs.refresh && '--refresh' || '' }} \
+            ${{ inputs.reset && '--reset' || '' }} \
+            ${{ inputs.limit && format('--limit {0}', inputs.limit) || '' }}
+
+      - name: Upload failed imports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-imports-${{ github.run_id }}
+          path: worker/failed_imports/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Show import summary
+        if: always()
+        run: |
+          echo "## Import Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f worker/cache/import_progress.json ]; then
+            echo "### Progress File" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat worker/cache/import_progress.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -d worker/failed_imports ] && [ "$(ls -A worker/failed_imports)" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Failed Imports" >> $GITHUB_STEP_SUMMARY
+            echo "Failed import files have been uploaded as artifacts." >> $GITHUB_STEP_SUMMARY
+            ls -lh worker/failed_imports/ >> $GITHUB_STEP_SUMMARY
+          fi

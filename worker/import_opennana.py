@@ -1,0 +1,713 @@
+#!/usr/bin/env python3
+"""
+OpenNana Prompt Gallery 导入脚本
+
+工作流程:
+1. 从 opennana.com 获取 prompts.json
+2. 解析出有 Twitter/X 来源的 prompts
+3. 尝试通过 main.py 的 process_twitter_url 流程处理
+4. 如果 Twitter 处理失败，直接使用原始 JSON 数据入库
+
+环境变量:
+  DATABASE_URL - PostgreSQL 连接字符串 (必需)
+  AI_MODEL     - AI 模型 (默认: openai)
+
+用法:
+  python import_opennana.py                    # 导入所有有 X 来源的 prompts
+  python import_opennana.py --limit 10         # 限制导入数量
+  python import_opennana.py --skip-twitter     # 跳过 Twitter 处理，直接用原始数据
+  python import_opennana.py --dry-run          # 预览模式，不写入数据库
+"""
+
+import os
+import sys
+import re
+import json
+import requests
+import argparse
+from typing import Optional, List, Dict, Any
+from datetime import datetime, timezone
+from pathlib import Path
+
+# 加载环境变量
+try:
+    from dotenv import load_dotenv
+    from pathlib import Path
+    
+    root_dir = Path(__file__).parent.parent
+    env_local = root_dir / ".env.local"
+    env_file = root_dir / ".env"
+    
+    if env_local.exists():
+        load_dotenv(env_local)
+        print(f"✓ 已加载: {env_local}")
+    elif env_file.exists():
+        load_dotenv(env_file)
+        print(f"✓ 已加载: {env_file}")
+except ImportError:
+    pass
+
+# 导入主模块的数据库类和处理函数
+from main import Database, process_twitter_url, map_category, AI_MODEL
+from fetch_twitter_content import classify_prompt_with_ai, extract_username
+
+# ========== 配置 ==========
+OPENNANA_JSON_URL = "https://opennana.com/awesome-prompt-gallery/data/prompts.json"
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+# 数据缓存目录
+CACHE_DIR = Path(__file__).parent / "cache"
+PROMPTS_CACHE_FILE = CACHE_DIR / "prompts.json"
+PROGRESS_FILE = CACHE_DIR / "import_progress.json"
+
+# 失败记录输出目录
+FAILED_OUTPUT_DIR = Path(__file__).parent / "failed_imports"
+
+# 分类映射: OpenNana tags -> 系统分类
+TAG_TO_CATEGORY = {
+    "portrait": "Portrait",
+    "landscape": "Landscape",
+    "nature": "Nature",
+    "architecture": "Architecture",
+    "abstract": "Abstract",
+    "cartoon": "Anime",
+    "anime": "Anime",
+    "photography": "Photography",
+    "illustration": "Illustration",
+    "infographic": "Illustration",
+    "typography": "Illustration",
+    "fashion": "Fashion",
+    "food": "Food",
+    "product": "Product",
+    "vehicle": "Product",
+    "gaming": "Sci-Fi",
+    "neon": "Cinematic",
+    "creative": "Other",
+    "paper-craft": "Clay / Felt",
+    "character": "Portrait",
+}
+
+
+def fetch_opennana_data(force_refresh: bool = False) -> Optional[Dict]:
+    """
+    从 OpenNana 获取 JSON 数据，支持本地缓存
+    
+    Args:
+        force_refresh: 强制从远程获取，忽略本地缓存
+    """
+    # 创建缓存目录
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # 检查本地缓存
+    if not force_refresh and PROMPTS_CACHE_FILE.exists():
+        try:
+            with open(PROMPTS_CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            total = data.get("total", len(data.get("items", [])))
+            cache_time = PROMPTS_CACHE_FILE.stat().st_mtime
+            cache_date = datetime.fromtimestamp(cache_time).strftime("%Y-%m-%d %H:%M:%S")
+            
+            print(f"📦 使用本地缓存: {PROMPTS_CACHE_FILE}")
+            print(f"   缓存时间: {cache_date}")
+            print(f"   共 {total} 条记录")
+            print(f"   (使用 --refresh 强制更新缓存)")
+            
+            return data
+        except Exception as e:
+            print(f"⚠️ 读取缓存失败: {e}，重新获取...")
+    
+    # 从远程获取
+    print(f"📡 正在获取: {OPENNANA_JSON_URL}")
+    
+    try:
+        response = requests.get(OPENNANA_JSON_URL, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        
+        total = data.get("total", len(data.get("items", [])))
+        print(f"✅ 获取成功: 共 {total} 条记录")
+        
+        # 保存到本地缓存
+        try:
+            with open(PROMPTS_CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            print(f"💾 已缓存到: {PROMPTS_CACHE_FILE}")
+        except Exception as e:
+            print(f"⚠️ 保存缓存失败: {e}")
+        
+        return data
+    except requests.exceptions.Timeout:
+        print("❌ 请求超时")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"❌ 请求失败: {e}")
+        return None
+    except json.JSONDecodeError as e:
+        print(f"❌ JSON 解析失败: {e}")
+        return None
+
+
+def load_progress() -> Dict:
+    """加载处理进度"""
+    if PROGRESS_FILE.exists():
+        try:
+            with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"processed_ids": [], "last_updated": None}
+
+
+def save_progress(progress: Dict):
+    """保存处理进度"""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    progress["last_updated"] = datetime.now(timezone.utc).isoformat()
+    
+    try:
+        with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
+            json.dump(progress, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ 保存进度失败: {e}")
+
+
+def clear_progress():
+    """清除处理进度"""
+    if PROGRESS_FILE.exists():
+        PROGRESS_FILE.unlink()
+        print("🗑️ 已清除处理进度")
+
+
+def extract_twitter_url(source: Dict) -> Optional[str]:
+    """从 source 对象中提取 Twitter/X URL"""
+    if not source:
+        return None
+    
+    url = source.get("url", "")
+    
+    # 检查是否是 Twitter/X 链接
+    if re.match(r"https?://(?:www\.)?(?:twitter\.com|x\.com)/\w+/status/\d+", url):
+        # 标准化为 x.com
+        return url.replace("twitter.com", "x.com")
+    
+    return None
+
+
+def infer_category_from_tags(tags: List[str]) -> str:
+    """从 tags 推断分类"""
+    if not tags:
+        return "Other"
+    
+    for tag in tags:
+        tag_lower = tag.lower()
+        if tag_lower in TAG_TO_CATEGORY:
+            return TAG_TO_CATEGORY[tag_lower]
+    
+    # 默认分类
+    return "Illustration"
+
+
+def process_opennana_item(db: Database, item: Dict, skip_twitter: bool = False, dry_run: bool = False) -> Dict[str, Any]:
+    """
+    处理单个 OpenNana 条目
+    
+    策略:
+    - 提示词: 直接使用 OpenNana JSON 里的原始数据
+    - 标题/分类/标签: 用 AI 解析
+    - 图片: 优先从 Twitter 获取高清图，失败则用 OpenNana 的图片
+    
+    返回: {"success": bool, "method": str, "error": str or None, "twitter_failed": bool}
+    """
+    item_id = item.get("id", "unknown")
+    json_title = item.get("title", "Untitled")
+    source = item.get("source") or {}
+    
+    # 提取 Twitter URL
+    twitter_url = extract_twitter_url(source)
+    
+    # 获取提示词（直接使用 OpenNana 的数据）
+    prompts = item.get("prompts", [])
+    prompt_text = prompts[0] if prompts else ""
+    
+    if not prompt_text:
+        return {"success": False, "method": "skipped", "error": "No prompt text", "twitter_failed": False}
+    
+    # 获取图片 URL（OpenNana 的图片作为备用）
+    images = item.get("images", [])
+    base_url = "https://opennana.com/awesome-prompt-gallery/data/"
+    fallback_images = []
+    for img in images:
+        if img.startswith("http"):
+            fallback_images.append(img)
+        else:
+            fallback_images.append(base_url + img)
+    
+    # source link: 优先用 Twitter URL，否则用 source URL
+    source_link = twitter_url or source.get("url", "")
+    
+    # 检查是否已存在
+    if source_link and db.prompt_exists(source_link):
+        return {"success": False, "method": "skipped", "error": "Already exists", "twitter_failed": False}
+    
+    # 用于最终入库的数据
+    final_title = json_title
+    final_category = infer_category_from_tags(item.get("tags", []))
+    final_tags = item.get("tags", [])[:5]
+    final_images = fallback_images[:5]
+    twitter_failed = False
+    twitter_error = None
+    
+    # 如果有 Twitter URL，尝试获取高清图片
+    if twitter_url and not skip_twitter:
+        print(f"   🐦 尝试从 Twitter 获取图片...")
+        
+        try:
+            from fetch_twitter_content import fetch_tweet
+            
+            result = fetch_tweet(
+                twitter_url,
+                download_images=False,
+                extract_prompt=False,  # 不需要提取提示词，使用 OpenNana 的
+                ai_model=AI_MODEL
+            )
+            
+            # 检查是否成功获取到图片（图片数量必须 > 0）
+            twitter_images = result.get("images", []) if result else []
+            
+            if twitter_images and len(twitter_images) > 0:
+                # 使用 Twitter 的高清图片
+                final_images = twitter_images[:5]
+                print(f"   ✅ 获取到 {len(final_images)} 张 Twitter 图片")
+            else:
+                # 抓取成功但图片数量为 0，也算失败
+                twitter_failed = True
+                if result:
+                    twitter_error = "Twitter 抓取成功但无图片"
+                else:
+                    twitter_error = "Twitter 抓取失败"
+                print(f"   ⚠️ {twitter_error}，使用 OpenNana 图片")
+                
+        except Exception as e:
+            twitter_failed = True
+            twitter_error = str(e)
+            print(f"   ⚠️ Twitter 异常: {e}，使用 OpenNana 图片")
+    
+    # 使用 AI 解析标题、分类、标签
+    print(f"   🤖 AI 解析分类...")
+    try:
+        classification = classify_prompt_with_ai(prompt_text, AI_MODEL)
+        
+        if classification:
+            # 使用 AI 返回的标题（如果有效）
+            ai_title = classification.get("title", "").strip()
+            if ai_title and ai_title != "Untitled Prompt":
+                final_title = ai_title
+            
+            # 使用 AI 返回的分类
+            ai_category = classification.get("category", "").strip()
+            if ai_category:
+                final_category = ai_category
+            
+            # 使用 AI 返回的标签
+            ai_tags = classification.get("sub_categories", [])
+            if ai_tags and isinstance(ai_tags, list):
+                # 合并 AI 标签和原始标签，去重
+                combined_tags = list(dict.fromkeys(ai_tags + final_tags))
+                final_tags = combined_tags[:5]
+            
+            print(f"   ✅ AI 解析成功")
+    except Exception as e:
+        print(f"   ⚠️ AI 解析失败: {e}，使用原始数据")
+    
+    # 如果有 Twitter URL 但获取图片失败，不入库，只记录到失败文件
+    if twitter_url and twitter_failed:
+        print(f"   ❌ Twitter 图片获取失败，不入库，记录到失败文件")
+        return {
+            "success": False, 
+            "method": "twitter_failed", 
+            "error": twitter_error, 
+            "twitter_failed": True,
+            "twitter_error": twitter_error
+        }
+    
+    if dry_run:
+        print(f"   🔍 [Dry Run] 将入库:")
+        print(f"      标题: {final_title}")
+        print(f"      分类: {final_category}")
+        print(f"      标签: {final_tags}")
+        print(f"      图片: {len(final_images)}")
+        print(f"      提示词: {prompt_text[:80]}...")
+        return {"success": True, "method": "dry_run", "error": None, "twitter_failed": False}
+    
+    # 提取作者（如果有 Twitter URL）
+    author = None
+    if twitter_url:
+        try:
+            author = extract_username(twitter_url)
+        except:
+            pass
+
+    # 写入数据库
+    try:
+        record = db.save_prompt(
+            title=final_title,
+            prompt=prompt_text,
+            category=final_category,
+            tags=final_tags,
+            images=final_images,
+            source_link=source_link,
+            author=author,
+            import_source="opennana"  # 标记导入来源
+        )
+
+        if record:
+            method = "hybrid" if twitter_url else "json_direct"
+            return {"success": True, "method": method, "error": None, "twitter_failed": False}
+        else:
+            return {"success": False, "method": "save_failed", "error": "Database save returned None", "twitter_failed": False}
+    except Exception as e:
+        return {"success": False, "method": "save_failed", "error": str(e), "twitter_failed": False}
+
+
+def save_failed_twitter_items(failed_twitter_items: List[Dict], timestamp: str):
+    """保存 Twitter 处理失败的条目到文件供人工处理"""
+    if not failed_twitter_items:
+        return None
+    
+    # 创建输出目录
+    FAILED_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # 生成文件名
+    filename = f"twitter_failed_{timestamp}.json"
+    filepath = FAILED_OUTPUT_DIR / filename
+    
+    # 保存为 JSON 文件
+    output_data = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "total": len(failed_twitter_items),
+        "description": "Twitter 图片获取失败的条目（未入库）",
+        "instructions": [
+            "这些条目的 Twitter 图片获取失败，未入库",
+            "人工处理步骤:",
+            "1. 访问 twitter_url 获取高清图片 URL",
+            "2. 手动入库或使用脚本处理",
+            "3. 或使用 --skip-twitter 跳过 Twitter 处理，直接用 OpenNana 图片入库"
+        ],
+        "items": failed_twitter_items
+    }
+    
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(output_data, f, ensure_ascii=False, indent=2)
+    
+    return filepath
+
+
+def run_import(limit: int = None, skip_twitter: bool = False, dry_run: bool = False, 
+               only_twitter: bool = False, start_id: int = None, force_refresh: bool = False,
+               resume: bool = True, reset_progress: bool = False):
+    """
+    运行导入流程
+    
+    Args:
+        limit: 限制处理数量
+        skip_twitter: 跳过 Twitter 处理
+        dry_run: 预览模式
+        only_twitter: 仅处理有 X 来源的
+        start_id: 从指定 ID 开始
+        force_refresh: 强制刷新缓存
+        resume: 断点续传（默认开启）
+        reset_progress: 重置进度
+    """
+    print("=" * 70)
+    print("📦 OpenNana Prompt Gallery 导入")
+    print("=" * 70)
+    print(f"数据源: {OPENNANA_JSON_URL}")
+    print(f"跳过 Twitter 处理: {skip_twitter}")
+    print(f"仅处理有 X 来源的: {only_twitter}")
+    print(f"预览模式: {dry_run}")
+    print(f"断点续传: {resume}")
+    if limit:
+        print(f"限制数量: {limit}")
+    if start_id:
+        print(f"起始 ID: {start_id}")
+    print("=" * 70)
+    
+    # 重置进度
+    if reset_progress:
+        clear_progress()
+    
+    # 检查配置
+    if not DATABASE_URL:
+        print("❌ 缺少 DATABASE_URL 环境变量")
+        sys.exit(1)
+    
+    # 获取数据（支持缓存）
+    data = fetch_opennana_data(force_refresh=force_refresh)
+    if not data:
+        sys.exit(1)
+    
+    items = data.get("items", [])
+    
+    # 如果只处理有 Twitter 来源的
+    if only_twitter:
+        items = [item for item in items if extract_twitter_url(item.get("source"))]
+        print(f"📊 有 X 来源的条目: {len(items)}")
+    
+    # 按 ID 从小到大排序
+    items = sorted(items, key=lambda x: x.get("id", 0))
+    print(f"📊 按 ID 升序排列")
+    
+    # 如果指定了起始 ID
+    if start_id:
+        items = [item for item in items if item.get("id", 0) >= start_id]
+        print(f"📊 ID >= {start_id} 的条目: {len(items)}")
+    
+    # 加载进度，过滤已处理的条目
+    progress = load_progress()
+    processed_ids = set(progress.get("processed_ids", []))
+    
+    if resume and processed_ids:
+        original_count = len(items)
+        items = [item for item in items if item.get("id") not in processed_ids]
+        skipped_count = original_count - len(items)
+        
+        if skipped_count > 0:
+            print(f"📊 已处理（跳过）: {skipped_count}")
+            print(f"   上次更新: {progress.get('last_updated', 'N/A')}")
+    
+    # 限制数量
+    if limit:
+        items = items[:limit]
+    
+    total_items = len(items)
+    print(f"\n🔄 准备处理 {total_items} 条记录...\n")
+    
+    if total_items == 0:
+        print("✅ 没有需要处理的记录")
+        return
+    
+    # 连接数据库
+    db = Database(DATABASE_URL)
+    
+    try:
+        db.connect()
+        print("✅ 数据库连接成功\n")
+    except Exception as e:
+        print(f"❌ 数据库连接失败: {e}")
+        sys.exit(1)
+    
+    # 统计
+    stats = {
+        "total": len(items),
+        "processed": 0,
+        "success_twitter": 0,
+        "success_json": 0,
+        "skipped": 0,
+        "failed": 0,
+        "twitter_failed": 0,
+    }
+    
+    failed_items = []
+    failed_twitter_items = []  # Twitter 处理失败的条目
+    
+    # 生成时间戳
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # 定期刷新失败文件的间隔（每 20 条）
+    FLUSH_INTERVAL = 20
+    failed_file = None
+    
+    try:
+        for i, item in enumerate(items, 1):
+            item_id = item.get("id", "?")
+            title = item.get("title", "Untitled")[:40]
+            source = item.get("source") or {}
+            twitter_url = extract_twitter_url(source)
+            
+            # 显示进度条
+            progress_pct = (i / total_items) * 100
+            print(f"[{i}/{total_items}] ({progress_pct:.1f}%) ID={item_id}: {title}")
+            
+            if twitter_url:
+                print(f"   🔗 X: {twitter_url}")
+            
+            result = process_opennana_item(db, item, skip_twitter=skip_twitter, dry_run=dry_run)
+            stats["processed"] += 1
+            
+            # 记录 Twitter 处理失败的条目
+            if result.get("twitter_failed"):
+                stats["twitter_failed"] += 1
+                
+                # 构建完整图片 URL
+                base_url = "https://opennana.com/awesome-prompt-gallery/data/"
+                images = item.get("images", [])
+                full_images = []
+                for img in images:
+                    if img.startswith("http"):
+                        full_images.append(img)
+                    else:
+                        full_images.append(base_url + img)
+                
+                failed_twitter_items.append({
+                    "id": item_id,
+                    "title": item.get("title", "Untitled"),
+                    "twitter_url": twitter_url,
+                    "error": result.get("twitter_error", "Unknown error"),
+                    "saved_to_db": result.get("success", False),  # 是否已入库（使用备用图片）
+                    # 用于人工处理的关键数据
+                    "prompt_preview": (item.get("prompts", [""])[0][:200] + "...") if item.get("prompts") else None,
+                    "full_prompt": item.get("prompts", [""])[0] if item.get("prompts") else None,  # 完整提示词
+                    "images": full_images[:5],  # 保留前5张图片URL
+                    "tags": item.get("tags", []),
+                    "model": item.get("model"),
+                    "source_name": (item.get("source") or {}).get("name"),
+                })
+            
+            if result["success"]:
+                if result["method"] == "hybrid":
+                    stats["success_twitter"] += 1
+                    print(f"   ✅ 成功入库 (Twitter图片+AI分类)")
+                elif result["method"] == "json_direct":
+                    stats["success_json"] += 1
+                    print(f"   ✅ 成功入库 (OpenNana图片+AI分类)")
+                elif result["method"] == "dry_run":
+                    print(f"   ✅ 预览通过")
+            else:
+                if result["method"] == "skipped":
+                    stats["skipped"] += 1
+                    print(f"   ⏭️ 跳过: {result['error']}")
+                elif result["method"] == "twitter_failed":
+                    # Twitter 失败，不入库，记录到文件
+                    print(f"   📝 记录到失败文件 (Twitter图片获取失败)")
+                elif result["method"] == "save_failed":
+                    stats["failed"] += 1
+                    failed_items.append({"id": item_id, "title": title, "error": result["error"]})
+                    print(f"   ❌ 保存失败: {result['error']}")
+                else:
+                    stats["failed"] += 1
+                    failed_items.append({"id": item_id, "title": title, "error": result["error"]})
+                    print(f"   ❌ 失败: {result['error']}")
+            
+            # 保存进度（每处理一条就保存，支持中断续传）
+            if not dry_run and item_id != "?":
+                processed_ids.add(item_id)
+                # 每处理 10 条保存一次进度，减少 IO
+                if i % 10 == 0 or i == total_items:
+                    save_progress({"processed_ids": list(processed_ids)})
+            
+            # 定期刷新失败文件（每 FLUSH_INTERVAL 条或最后一条）
+            if not dry_run and failed_twitter_items and (i % FLUSH_INTERVAL == 0 or i == total_items):
+                failed_file = save_failed_twitter_items(failed_twitter_items, timestamp)
+                print(f"   💾 已刷新失败记录到文件 ({len(failed_twitter_items)} 条)")
+            
+            print()
+        
+        # 最终保存 Twitter 处理失败的条目到文件
+        if failed_twitter_items and not dry_run:
+            failed_file = save_failed_twitter_items(failed_twitter_items, timestamp)
+        
+        # 输出统计
+        print("=" * 70)
+        print("📊 导入完成 - 统计汇总")
+        print("=" * 70)
+        print(f"\n总计: {stats['total']}")
+        print(f"已处理: {stats['processed']}")
+        print(f"✅ 成功 (Twitter): {stats['success_twitter']}")
+        print(f"✅ 成功 (JSON): {stats['success_json']}")
+        print(f"⏭️ 跳过: {stats['skipped']}")
+        print(f"❌ 失败: {stats['failed']}")
+        print(f"⚠️ Twitter 处理失败: {stats['twitter_failed']}")
+        
+        if failed_items:
+            print("\n" + "=" * 70)
+            print("❌ 完全失败的条目:")
+            print("=" * 70)
+            for item in failed_items[:10]:
+                print(f"   ID={item['id']}: {item['title']}")
+                print(f"   错误: {item['error']}")
+                print()
+            if len(failed_items) > 10:
+                print(f"   ... 还有 {len(failed_items) - 10} 条失败记录")
+        
+        # 显示失败文件信息
+        if failed_file:
+            print("\n" + "=" * 70)
+            print("📁 Twitter 图片获取失败的条目已保存:")
+            print("=" * 70)
+            print(f"   文件: {failed_file}")
+            print(f"   数量: {len(failed_twitter_items)}")
+            print(f"   说明: 这些条目未入库，需要人工处理")
+            print(f"         或使用 --skip-twitter 跳过 Twitter 直接入库")
+        
+        print("\n" + "=" * 70)
+        
+    finally:
+        db.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="从 OpenNana Prompt Gallery 导入数据",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 导入所有数据（自动断点续传）
+  python import_opennana.py
+  
+  # 仅导入有 X 来源的，限制 10 条
+  python import_opennana.py --only-twitter --limit 10
+  
+  # 跳过 Twitter 处理，直接用 JSON 数据
+  python import_opennana.py --skip-twitter
+  
+  # 强制刷新缓存
+  python import_opennana.py --refresh
+  
+  # 重置进度，从头开始
+  python import_opennana.py --reset
+  
+  # 不使用断点续传
+  python import_opennana.py --no-resume
+  
+  # 预览模式
+  python import_opennana.py --dry-run --limit 5
+
+缓存文件:
+  worker/cache/prompts.json        - JSON 数据缓存
+  worker/cache/import_progress.json - 处理进度
+        """
+    )
+    
+    parser.add_argument("--limit", "-l", type=int, help="限制导入数量")
+    parser.add_argument("--skip-twitter", "-s", action="store_true", 
+                        help="跳过 Twitter 处理，直接使用 JSON 数据")
+    parser.add_argument("--only-twitter", "-t", action="store_true",
+                        help="仅处理有 X 来源的条目")
+    parser.add_argument("--dry-run", "-d", action="store_true",
+                        help="预览模式，不写入数据库")
+    parser.add_argument("--start-id", type=int,
+                        help="从指定 ID 开始处理 (ID 从大到小)")
+    parser.add_argument("--refresh", "-r", action="store_true",
+                        help="强制刷新缓存，重新下载 prompts.json")
+    parser.add_argument("--no-resume", action="store_true",
+                        help="禁用断点续传，处理所有条目")
+    parser.add_argument("--reset", action="store_true",
+                        help="重置进度，从头开始处理")
+    
+    args = parser.parse_args()
+    
+    run_import(
+        limit=args.limit,
+        skip_twitter=args.skip_twitter,
+        dry_run=args.dry_run,
+        only_twitter=args.only_twitter,
+        start_id=args.start_id,
+        force_refresh=args.refresh,
+        resume=not args.no_resume,
+        reset_progress=args.reset
+    )
+
+
+if __name__ == "__main__":
+    main()
+

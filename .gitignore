@@ -1,0 +1,41 @@
+# 环境变量
+.env
+.env.*
+.env.local
+
+# 敏感凭证
+*.pem
+*.key
+**/credentials*
+**/secrets*
+**/*_cookies.json
+**/x_cookies.json
+
+# 缓存和状态文件
+**/cache/
+**/*_state.json
+**/*_progress.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 失败导入记录
+**/failed_imports/

@@ -1,0 +1,60 @@
+name: Vivid Worker
+
+on:
+  # 定时任务：每天北京时间 1:30 和 17:00 运行
+  schedule:
+    - cron: "30 17 * * *"  # 北京时间 1:30 (UTC 17:30)
+    - cron: "0 9 * * *"    # 北京时间 17:00 (UTC 09:00)
+
+  # 允许手动触发
+  workflow_dispatch:
+    inputs:
+      tweet_url:
+        description: "直接处理单个 Twitter URL (可选)"
+        required: false
+        type: string
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  run-worker:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install -r worker/requirements.txt
+
+      - name: Install Playwright browsers
+        run: |
+          playwright install chromium || true
+        continue-on-error: true
+
+      - name: Run Worker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GMAIL_EMAIL: ${{ secrets.GMAIL_EMAIL }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+          GMAIL_SENDER_FILTER: ${{ secrets.GMAIL_SENDER_FILTER || 'grok' }}
+          AI_MODEL: ${{ secrets.AI_MODEL || 'openai' }}
+          GITEE_AI_API_KEY: ${{ secrets.GITEE_AI_API_KEY }}
+        run: |
+          cd worker
+
+          if [ -n "${{ github.event.inputs.tweet_url }}" ]; then
+            # 直接处理单个 URL
+            python main.py --url "${{ github.event.inputs.tweet_url }}"
+          else
+            # 运行完整流水线
+            python main.py
+          fi

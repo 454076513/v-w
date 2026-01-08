@@ -1,0 +1,23 @@
+# Worker 依赖
+
+# 数据库连接
+psycopg2-binary>=2.9.9
+
+# 环境变量加载
+python-dotenv>=1.0.0
+
+# HTTP 请求
+requests>=2.31.0
+
+# 日期时间解析
+python-dateutil>=2.8.0
+
+# HTML/XML 解析
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+
+# 浏览器自动化 (可选，用于 Twitter 内容抓取)
+playwright>=1.40.0
+
+# X/Twitter API - twikit 用于关键词搜索爆款推文
+twikit>=2.1.0

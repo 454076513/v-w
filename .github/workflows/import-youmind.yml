@@ -1,0 +1,125 @@
+name: Import YouMind Data
+
+on:
+  schedule:
+    # 每天北京时间 01:00 运行（UTC 17:00）
+    - cron: "0 17 * * *"
+  workflow_dispatch: # 允许手动触发
+    inputs:
+      limit:
+        description: "限制导入数量（留空则不限制）"
+        required: false
+        type: number
+      max_pages:
+        description: "最大抓取页数（留空则不限制）"
+        required: false
+        type: number
+      refresh:
+        description: "强制刷新缓存"
+        required: false
+        type: boolean
+        default: false
+      reset:
+        description: "重置进度，从头开始"
+        required: false
+        type: boolean
+        default: false
+      dry_run:
+        description: "预览模式，不写入数据库"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: "worker/requirements.txt"
+
+      - name: Cache progress and data files
+        uses: actions/cache@v4
+        with:
+          path: |
+            worker/cache/youmind_import_progress.json
+            worker/cache/youmind_prompts.json
+          key: youmind-progress-${{ github.run_id }}
+          restore-keys: |
+            youmind-progress-
+
+      - name: Ensure cache directory exists
+        run: |
+          mkdir -p worker/cache
+          mkdir -p worker/failed_imports
+
+      - name: Install dependencies
+        run: |
+          cd worker
+          pip install -r requirements.txt
+
+      - name: Run import (scheduled)
+        if: github.event_name == 'schedule'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GITEE_AI_API_KEY: ${{ secrets.GITEE_AI_API_KEY }}
+        run: |
+          cd worker
+          python import_youmind_api.py --limit 50
+
+      - name: Run import (manual)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GITEE_AI_API_KEY: ${{ secrets.GITEE_AI_API_KEY }}
+        run: |
+          cd worker
+          python import_youmind_api.py \
+            ${{ inputs.refresh && '--refresh' || '' }} \
+            ${{ inputs.reset && '--reset' || '' }} \
+            ${{ inputs.dry_run && '--dry-run' || '' }} \
+            ${{ inputs.limit && format('--limit {0}', inputs.limit) || '' }} \
+            ${{ inputs.max_pages && format('--max-pages {0}', inputs.max_pages) || '' }}
+
+      - name: Upload failed imports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: youmind-failed-imports-${{ github.run_id }}
+          path: worker/failed_imports/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Show import summary
+        if: always()
+        run: |
+          echo "## YouMind Import Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f worker/cache/youmind_import_progress.json ]; then
+            echo "### Progress File" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat worker/cache/youmind_import_progress.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f worker/cache/youmind_prompts.json ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Cache Stats" >> $GITHUB_STEP_SUMMARY
+            CACHE_COUNT=$(python3 -c "import json; print(len(json.load(open('worker/cache/youmind_prompts.json'))))")
+            echo "Cached prompts: $CACHE_COUNT" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -d worker/failed_imports ] && [ "$(ls -A worker/failed_imports)" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Failed Imports" >> $GITHUB_STEP_SUMMARY
+            echo "Failed import files have been uploaded as artifacts." >> $GITHUB_STEP_SUMMARY
+            ls -lh worker/failed_imports/ >> $GITHUB_STEP_SUMMARY
+          fi
