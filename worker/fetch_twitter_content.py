@@ -256,7 +256,7 @@ IMPORTANT RULES:
     ]
 
     try:
-        return _call_ai_with_fallback(messages, model)
+        return call_ai(messages, model)
     except requests.exceptions.Timeout:
         raise Exception("API 请求超时")
     except Exception as e:
@@ -326,8 +326,8 @@ Example response:
     ]
     
     try:
-        response_text = _call_ai_with_fallback(messages, model)
-        
+        response_text = call_ai(messages, model)
+
         # 尝试解析 JSON
         import json
         
@@ -892,7 +892,7 @@ def fetch_tweet(url: str, download_images: bool = True, output_dir: str = ".",
                         print(f"      ℹ️ 正则未匹配，尝试 AI 提取...")
                         try:
                             # 直接调用 AI 提取，不再检测 "Prompt in reply"
-                            reply_prompt = _call_ai_with_fallback([
+                            reply_prompt = call_ai([
                                 {
                                     "role": "system",
                                     "content": "You are a helpful assistant that extracts AI image generation prompts from text. Extract only the prompt itself, without any additional explanation or formatting. If no prompt is found, return 'No prompt found'."
