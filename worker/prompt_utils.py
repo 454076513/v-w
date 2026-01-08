@@ -43,17 +43,22 @@ except ImportError:
 POLLINATIONS_API_URL = "https://text.pollinations.ai/"
 DEFAULT_MODEL = "openai"
 
-# Gitee AI API 配置 (fallback)
+# Gitee AI API 配置 (fallback 1)
 GITEE_AI_API_URL = "https://ai.gitee.com/v1/chat/completions"
 GITEE_AI_MODEL = "DeepSeek-V3"
 GITEE_AI_API_KEY = os.environ.get("GITEE_AI_API_KEY", "")
+
+# NVIDIA API 配置 (fallback 2)
+NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+NVIDIA_MODEL = "deepseek-ai/deepseek-v3.2"
+NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY", "mHMcKtSCRsFEXQ2gyipZS6bn1aU01szMrkCRORruRFvtbCCwmjqeO")
 
 
 # ========== AI 调用 ==========
 
 def call_ai(messages: list, model: str = DEFAULT_MODEL) -> str:
     """
-    调用 AI API，如果 Pollinations 失败则 fallback 到 Gitee AI
+    调用 AI API，依次尝试 Pollinations -> Gitee AI -> NVIDIA API
 
     Args:
         messages: OpenAI 格式的消息列表
@@ -62,26 +67,44 @@ def call_ai(messages: list, model: str = DEFAULT_MODEL) -> str:
     Returns:
         AI 响应内容
     """
+    errors = []
+
     # 首先尝试 Pollinations AI
     try:
         result = _call_pollinations_ai(messages, model)
         return result
     except Exception as pollinations_error:
         print(f"⚠️ Pollinations AI 失败: {pollinations_error}")
+        errors.append(f"Pollinations ({pollinations_error})")
 
-        # Fallback 到 Gitee AI
-        if GITEE_AI_API_KEY:
-            print(f"🔄 尝试 Gitee AI (DeepSeek-V3) 作为 fallback...")
-            try:
-                result = _call_gitee_ai(messages)
-                print("✓ Gitee AI 调用成功")
-                return result
-            except Exception as gitee_error:
-                print(f"✗ Gitee AI 也失败: {gitee_error}")
-                raise Exception(f"所有 AI 服务都失败: Pollinations ({pollinations_error}), Gitee ({gitee_error})")
-        else:
-            print("⚠️ GITEE_AI_API_KEY 未设置，无法使用 fallback")
-            raise pollinations_error
+    # Fallback 1: Gitee AI
+    if GITEE_AI_API_KEY:
+        print(f"🔄 尝试 Gitee AI (DeepSeek-V3) 作为 fallback...")
+        try:
+            result = _call_gitee_ai(messages)
+            print("✓ Gitee AI 调用成功")
+            return result
+        except Exception as gitee_error:
+            print(f"✗ Gitee AI 也失败: {gitee_error}")
+            errors.append(f"Gitee ({gitee_error})")
+    else:
+        print("⚠️ GITEE_AI_API_KEY 未设置，跳过 Gitee AI")
+
+    # Fallback 2: NVIDIA API
+    if NVIDIA_API_KEY:
+        print(f"🔄 尝试 NVIDIA API (DeepSeek-V3.2) 作为 fallback...")
+        try:
+            result = _call_nvidia_ai(messages)
+            print("✓ NVIDIA API 调用成功")
+            return result
+        except Exception as nvidia_error:
+            print(f"✗ NVIDIA API 也失败: {nvidia_error}")
+            errors.append(f"NVIDIA ({nvidia_error})")
+    else:
+        print("⚠️ NVIDIA_API_KEY 未设置，跳过 NVIDIA API")
+
+    # 所有服务都失败
+    raise Exception(f"所有 AI 服务都失败: {', '.join(errors)}")
 
 
 def _call_pollinations_ai(messages: list, model: str = DEFAULT_MODEL) -> str:
@@ -202,6 +225,75 @@ def _call_gitee_ai(messages: list) -> str:
 
     if not full_content:
         raise Exception("Gitee AI 返回空响应")
+
+    return "".join(full_content)
+
+
+def _call_nvidia_ai(messages: list) -> str:
+    """
+    调用 NVIDIA API (fallback 2)，使用 stream 模式
+
+    Args:
+        messages: OpenAI 格式的消息列表
+
+    Returns:
+        AI 响应内容
+    """
+    import json
+
+    if not NVIDIA_API_KEY:
+        raise Exception("NVIDIA_API_KEY 环境变量未设置")
+
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {NVIDIA_API_KEY}',
+        'Accept': 'text/event-stream',
+    }
+
+    payload = {
+        "model": NVIDIA_MODEL,
+        "messages": messages,
+        "temperature": 0.7,
+        "stream": True,
+    }
+
+    response = requests.post(
+        NVIDIA_API_URL,
+        json=payload,
+        headers=headers,
+        timeout=(10, 300),
+        stream=True
+    )
+
+    if response.status_code != 200:
+        raise Exception(f"NVIDIA API 请求失败: {response.status_code} - {response.text}")
+
+    full_content = []
+
+    for line in response.iter_lines():
+        if not line:
+            continue
+
+        line = line.decode('utf-8')
+
+        if line.startswith('data: '):
+            data_str = line[6:]
+
+            if data_str == '[DONE]':
+                break
+
+            try:
+                data = json.loads(data_str)
+                if "choices" in data and len(data["choices"]) > 0:
+                    delta = data["choices"][0].get("delta", {})
+                    content = delta.get("content", "")
+                    if content:
+                        full_content.append(content)
+            except json.JSONDecodeError:
+                continue
+
+    if not full_content:
+        raise Exception("NVIDIA API 返回空响应")
 
     return "".join(full_content)
 
