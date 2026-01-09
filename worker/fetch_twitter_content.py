@@ -45,7 +45,7 @@ except ImportError:
     HAS_PLAYWRIGHT = False
 
 
-# 导入公用模块
+# 导入公用模块 (统一的 AI 提取和分类)
 from prompt_utils import (
     extract_prompt,
     extract_prompt_regex,
@@ -55,6 +55,30 @@ from prompt_utils import (
     call_ai,
     DEFAULT_MODEL,
 )
+
+# 向后兼容别名 (供其他模块导入使用)
+extract_prompt_from_text = extract_prompt_regex  # 正则提取
+classify_prompt_with_ai = classify_prompt        # AI分类
+
+
+def extract_prompt_with_ai(text: str, model: str = DEFAULT_MODEL) -> str:
+    """
+    向后兼容的 AI 提取函数
+
+    使用 prompt_utils.extract_prompt 的统一流程
+
+    Returns:
+        提取的 prompt 字符串，或 "Prompt in reply" / "No prompt found"
+    """
+    result = extract_prompt(text, model=model, use_ai=True)
+
+    if result["location"] == "reply":
+        return "Prompt in reply"
+
+    if result["prompt"]:
+        return result["prompt"]
+
+    return "No prompt found"
 
 # Twitter Cookies 配置 (用于获取评论)
 import json
@@ -81,15 +105,6 @@ def _load_twitter_cookies() -> dict:
             pass
 
     return {}
-
-
-# ========== 以下函数已移至 prompt_utils.py ==========
-# - extract_prompt_from_text -> prompt_utils.extract_prompt_regex
-# - detect_prompt_in_reply -> prompt_utils.detect_prompt_in_reply
-# - extract_prompt_with_ai -> prompt_utils.extract_prompt
-# - classify_prompt_with_ai -> prompt_utils.classify_prompt
-# - _call_ai_with_fallback -> prompt_utils.call_ai
-# - _call_pollinations_ai, _call_gitee_ai (内部函数)
 
 
 def fetch_author_replies(tweet_id: str, author_username: str) -> list:
@@ -149,264 +164,6 @@ def fetch_author_replies(tweet_id: str, author_username: str) -> list:
         return []
 
 
-# 检测 "prompt 在评论中" 的指示符模式 (已移至 prompt_utils.py)
-PROMPT_IN_REPLY_PATTERNS = [
-    r'prompt\s*[👇⬇️↓🔽]',          # "Prompt👇", "prompt ⬇️"
-    r'[👇⬇️↓🔽]\s*prompt',          # "👇prompt"
-    r'prompt\s+below',              # "prompt below"
-    r'prompt\s+in\s+(the\s+)?(comment|reply|replies|thread)',  # "prompt in comment"
-    r'check\s+(the\s+)?(comment|reply|replies)',  # "check the comment"
-    r'see\s+(the\s+)?(comment|reply|replies)',    # "see comment"
-    r'(comment|reply|replies)\s+for\s+prompt',    # "comment for prompt"
-    r'full\s+prompt\s+[👇⬇️↓🔽]',   # "full prompt 👇"
-    r'提示词\s*[👇⬇️↓🔽]',           # 中文: "提示词👇"
-    r'[👇⬇️↓🔽]\s*提示词',           # 中文: "👇提示词"
-]
-
-
-def extract_prompt_from_text(text: str) -> str:
-    """
-    尝试使用正则表达式从文本中提取 prompt
-    用于快速提取格式规范的 prompt，避免 AI 调用
-
-    Args:
-        text: 推文或回复文本
-
-    Returns:
-        提取的 prompt 或 None
-    """
-    if not text:
-        return None
-
-    # 常见的 prompt 引导模式
-    patterns = [
-        # 👉Prompt: ... 或 Prompt: ...
-        r'(?:👉\s*)?[Pp]rompt[:\s]+(.+)',
-        # "prompt" 后面跟着换行和内容
-        r'[Pp]rompt\s*\n+(.+)',
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
-        if match:
-            prompt = match.group(1).strip()
-            # 清理开头的引号、括号等
-            prompt = re.sub(r'^[\"\'\[\(]+', '', prompt)
-            # 如果 prompt 足够长，认为是有效的
-            if len(prompt) > 50:
-                return prompt
-
-    return None
-
-
-def detect_prompt_in_reply(text: str) -> bool:
-    """
-    检测推文文本是否表明 prompt 在评论/回复中
-
-    Args:
-        text: 推文正文内容
-
-    Returns:
-        True 如果检测到 prompt 可能在评论中
-    """
-    if not text:
-        return False
-
-    text_lower = text.lower()
-
-    for pattern in PROMPT_IN_REPLY_PATTERNS:
-        if re.search(pattern, text_lower, re.IGNORECASE):
-            return True
-
-    return False
-
-
-def extract_prompt_with_ai(text: str, model: str = DEFAULT_MODEL) -> str:
-    """
-    使用 AI API 从文本中提取提示词
-    优先使用 Pollinations AI，失败后 fallback 到 Gitee AI (DeepSeek-V3)
-
-    Args:
-        text: 推文正文内容
-        model: 使用的模型，默认 openai，可选 deepseek
-
-    Returns:
-        提取出的提示词，如果 prompt 在评论中返回 'Prompt in reply'
-    """
-    # 首先检测是否是 "prompt 在评论中" 的情况
-    if detect_prompt_in_reply(text):
-        return "Prompt in reply"
-
-    messages = [
-        {
-            "role": "system",
-            "content": """You are a helpful assistant that extracts AI image generation prompts from text.
-
-IMPORTANT RULES:
-1. Extract only the actual prompt itself, without any additional explanation or formatting.
-2. If the text contains indicators like "Prompt👇", "prompt below", "check comment", "prompt in reply" etc., it means the actual prompt is in a reply/comment, not in the main post. In this case, return 'Prompt in reply'.
-3. If the text only contains a title or description of what the image shows (like "Nano Banana prompt" or "Any person to Trash Pop Collage") but NOT the actual detailed prompt, return 'No prompt found'.
-4. A real prompt usually contains detailed descriptions, style parameters (like --ar, --v), or specific technical terms.
-5. If no actual prompt is found, return 'No prompt found'."""
-        },
-        {
-            "role": "user",
-            "content": f"Extract the AI image generation prompt from this text and return only the prompt itself:\n\n{text}"
-        }
-    ]
-
-    try:
-        return call_ai(messages, model)
-    except requests.exceptions.Timeout:
-        raise Exception("API 请求超时")
-    except Exception as e:
-        raise Exception(f"提取提示词失败: {e}")
-
-
-# 预定义的分类列表
-PROMPT_CATEGORIES = [
-    "人像/肖像 (Portrait)",
-    "风景/自然 (Landscape/Nature)",
-    "动物 (Animals)",
-    "建筑/城市 (Architecture/Urban)",
-    "抽象艺术 (Abstract Art)",
-    "科幻/未来 (Sci-Fi/Futuristic)",
-    "奇幻/魔法 (Fantasy/Magic)",
-    "动漫/卡通 (Anime/Cartoon)",
-    "写实摄影 (Realistic Photography)",
-    "插画/绘画 (Illustration/Painting)",
-    "时尚/服装 (Fashion/Clothing)",
-    "食物/美食 (Food)",
-    "产品/商业 (Product/Commercial)",
-    "恐怖/黑暗 (Horror/Dark)",
-    "可爱/萌系 (Cute/Kawaii)",
-    "复古/怀旧 (Vintage/Retro)",
-    "极简主义 (Minimalist)",
-    "超现实 (Surreal)",
-    "其他 (Other)",
-]
-
-
-def classify_prompt_with_ai(prompt: str, model: str = DEFAULT_MODEL) -> dict:
-    """
-    使用 AI API 对提示词进行分类
-    优先使用 Pollinations AI，失败后 fallback 到 Gitee AI (DeepSeek-V3)
-    
-    Args:
-        prompt: 提示词内容
-        model: 使用的模型
-    
-    Returns:
-        包含分类结果的字典 {"category": "分类", "confidence": "高/中/低", "reason": "原因"}
-    """
-    categories_str = "\n".join([f"- {cat}" for cat in PROMPT_CATEGORIES])
-    
-    messages = [
-        {
-            "role": "system",
-            "content": f"""You are an AI image prompt classifier. Analyze the given prompt and classify it into one of the following categories:
-
-{categories_str}
-
-Respond in JSON format with exactly these fields:
-- "title": a concise, descriptive title for this prompt in English (3-8 words, like a short headline)
-- "category": the main category (choose from the list above, use the English part only, e.g., "Portrait", "Landscape/Nature")
-- "sub_categories": array of 1-3 secondary categories in English (e.g., ["Fashion/Clothing", "Realistic Photography"])
-- "style": detected art style (e.g., "photorealistic", "anime", "oil painting", "3D render", etc.)
-- "confidence": "high", "medium", or "low"
-- "reason": brief explanation in English (1 sentence)
-
-Example response:
-{{"title": "Fashion Actress Bird's Eye View", "category": "Portrait", "sub_categories": ["Fashion/Clothing"], "style": "photorealistic", "confidence": "high", "reason": "The prompt describes a Japanese actress in a black coat from above"}}"""
-        },
-        {
-            "role": "user",
-            "content": f"Classify this AI image generation prompt:\n\n{prompt}"
-        }
-    ]
-    
-    try:
-        response_text = call_ai(messages, model)
-
-        # 尝试解析 JSON
-        import json
-        
-        result = None
-        
-        # 清理响应文本
-        cleaned_text = response_text.strip()
-        
-        # 移除可能的 markdown 代码块标记
-        if cleaned_text.startswith("```json"):
-            cleaned_text = cleaned_text[7:]
-        elif cleaned_text.startswith("```"):
-            cleaned_text = cleaned_text[3:]
-        if cleaned_text.endswith("```"):
-            cleaned_text = cleaned_text[:-3]
-        cleaned_text = cleaned_text.strip()
-        
-        # 尝试直接解析
-        try:
-            result = json.loads(cleaned_text)
-        except json.JSONDecodeError:
-            # 尝试从响应中提取 JSON (支持嵌套)
-            json_match = re.search(r'\{.*\}', cleaned_text, re.DOTALL)
-            if json_match:
-                try:
-                    result = json.loads(json_match.group())
-                except:
-                    pass
-        
-        if not result:
-            # 解析失败，返回原始响应
-            print(f"      ⚠️ JSON 解析失败，原始响应: {response_text[:200]}")
-            return {
-                "title": "Untitled Prompt",
-                "category": "Other",
-                "sub_categories": [],
-                "style": "unknown",
-                "confidence": "low",
-                "reason": "Failed to parse classification result"
-            }
-        
-        # 标准化结果，确保所有必要字段存在
-        normalized = {
-            "title": result.get("title", "未命名提示词"),
-            "category": result.get("category", "其他 (Other)"),
-            "sub_categories": result.get("sub_categories", []),
-            "style": result.get("style", "unknown"),
-            "confidence": result.get("confidence", "中"),
-            "reason": result.get("reason", ""),
-        }
-        
-        # 确保 title 是字符串
-        if not isinstance(normalized["title"], str) or not normalized["title"].strip():
-            normalized["title"] = "Untitled Prompt"
-        
-        # 确保 sub_categories 是列表
-        if not isinstance(normalized["sub_categories"], list):
-            normalized["sub_categories"] = []
-        
-        # 清理 sub_categories
-        cleaned_tags = []
-        for tag in normalized["sub_categories"]:
-            if isinstance(tag, str) and tag.strip():
-                cleaned_tags.append(tag.strip())
-        normalized["sub_categories"] = cleaned_tags
-        
-        # 添加 style 到 tags 中（如果不为空）
-        if normalized["style"] and normalized["style"] != "unknown":
-            if normalized["style"] not in normalized["sub_categories"]:
-                normalized["sub_categories"].append(normalized["style"])
-        
-        print(f"      📋 分类结果: title={normalized['title']}, category={normalized['category']}, tags={normalized['sub_categories']}")
-        
-        return normalized
-        
-    except requests.exceptions.Timeout:
-        raise Exception("API 请求超时")
-    except Exception as e:
-        raise Exception(f"分类失败: {e}")
 
 
 def extract_tweet_id(url: str) -> str:

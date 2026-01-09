@@ -49,6 +49,8 @@ except ImportError:
 
 # 导入主模块的数据库类和处理函数
 from main import Database, process_twitter_url, map_category, AI_MODEL
+
+# AI 处理适配函数 (统一使用 prompt_utils)
 from fetch_twitter_content import classify_prompt_with_ai, extract_username
 
 # ========== 配置 ==========

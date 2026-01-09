@@ -73,11 +73,13 @@ except ImportError:
     print("Please install psycopg2: pip install psycopg2-binary")
     sys.exit(1)
 
-# 导入现有的处理函数
+# 导入 AI 处理函数 (统一使用 prompt_utils)
+from prompt_utils import DEFAULT_MODEL
+
+# 导入 Twitter API 函数和 AI 处理适配函数
 from fetch_twitter_content import (
     extract_prompt_with_ai,
     classify_prompt_with_ai,
-    DEFAULT_MODEL,
     fetch_with_fxtwitter,
     parse_fxtwitter_result,
 )
