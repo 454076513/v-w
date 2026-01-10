@@ -420,13 +420,17 @@ def extract_prompt(text: str, model: str = DEFAULT_MODEL, use_ai: bool = True) -
     if use_ai:
         try:
             ai_result = _extract_prompt_with_ai(text, model)
-            if ai_result and ai_result not in ["No prompt found", "Prompt in reply"]:
+            if ai_result and ai_result not in ["No prompt found", "Prompt in reply", "Advertisement"]:
                 result["prompt"] = ai_result
                 result["location"] = "post"
                 result["method"] = "ai"
             elif ai_result == "Prompt in reply":
                 result["prompt"] = "Prompt in reply"
                 result["location"] = "reply"
+                result["method"] = "ai"
+            elif ai_result == "Advertisement":
+                result["prompt"] = "Advertisement"
+                result["location"] = None
                 result["method"] = "ai"
         except Exception as e:
             print(f"⚠️ AI 提取失败: {e}")
@@ -443,7 +447,10 @@ def _extract_prompt_with_ai(text: str, model: str = DEFAULT_MODEL) -> str:
         model: 使用的模型
 
     Returns:
-        提取出的提示词
+        提取出的提示词，或特殊值:
+        - "Prompt in reply": prompt 在评论/回复中
+        - "No prompt found": 未找到 prompt
+        - "Advertisement": 内容是广告/推广
     """
     messages = [
         {
@@ -451,11 +458,21 @@ def _extract_prompt_with_ai(text: str, model: str = DEFAULT_MODEL) -> str:
             "content": """You are a helpful assistant that extracts AI image generation prompts from text.
 
 IMPORTANT RULES:
-1. Extract only the actual prompt itself, without any additional explanation or formatting.
-2. If the text contains indicators like "Prompt👇", "prompt below", "check comment", "prompt in reply" etc., it means the actual prompt is in a reply/comment, not in the main post. In this case, return 'Prompt in reply'.
-3. If the text only contains a title or description of what the image shows (like "Nano Banana prompt" or "Any person to Trash Pop Collage") but NOT the actual detailed prompt, return 'No prompt found'.
-4. A real prompt usually contains detailed descriptions, style parameters (like --ar, --v), or specific technical terms.
-5. If no actual prompt is found, return 'No prompt found'."""
+1. FIRST, check if this is an advertisement or promotional content. Signs of ads include:
+   - Product promotions, sales, discounts, deals
+   - Service promotions (courses, tools, subscriptions)
+   - Affiliate links, referral codes, promo codes
+   - "Buy now", "Limited time", "Sign up", "Join", "Subscribe"
+   - App/software promotions without actual prompts
+   - Giveaways that require following/retweeting
+   - Self-promotion of services or products
+   If it's an advertisement, return 'Advertisement'.
+
+2. Extract only the actual prompt itself, without any additional explanation or formatting.
+3. If the text contains indicators like "Prompt👇", "prompt below", "check comment", "prompt in reply" etc., it means the actual prompt is in a reply/comment, not in the main post. In this case, return 'Prompt in reply'.
+4. If the text only contains a title or description of what the image shows (like "Nano Banana prompt" or "Any person to Trash Pop Collage") but NOT the actual detailed prompt, return 'No prompt found'.
+5. A real prompt usually contains detailed descriptions, style parameters (like --ar, --v), or specific technical terms.
+6. If no actual prompt is found, return 'No prompt found'."""
         },
         {
             "role": "user",

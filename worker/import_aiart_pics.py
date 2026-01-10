@@ -260,6 +260,11 @@ async def process_item(db: Database, page, slug: str, title: str, dry_run: bool 
     if not prompt:
         return {"success": False, "method": "twitter_failed", "error": "No prompt from Twitter", "twitter_failed": True}
 
+    # 检测是否为广告 (由 fetch_tweet 统一处理)
+    if result.get("is_advertisement"):
+        print(f"   🚫 检测到广告内容，跳过")
+        return {"success": False, "method": "skipped", "error": "Advertisement content detected"}
+
     print(f"   ✅ 获取到 {len(images)} 张图片")
 
     # 3. AI 分类 - 优先使用 AI 结果

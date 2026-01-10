@@ -68,9 +68,15 @@ def extract_prompt_with_ai(text: str, model: str = DEFAULT_MODEL) -> str:
     使用 prompt_utils.extract_prompt 的统一流程
 
     Returns:
-        提取的 prompt 字符串，或 "Prompt in reply" / "No prompt found"
+        提取的 prompt 字符串，或:
+        - "Prompt in reply": prompt 在评论中
+        - "No prompt found": 未找到 prompt
+        - "Advertisement": 内容是广告/推广
     """
     result = extract_prompt(text, model=model, use_ai=True)
+
+    if result["prompt"] == "Advertisement":
+        return "Advertisement"
 
     if result["location"] == "reply":
         return "Prompt in reply"
@@ -451,18 +457,29 @@ def parse_vxtwitter_result(data: dict) -> dict:
     return result
 
 
-def fetch_tweet(url: str, download_images: bool = True, output_dir: str = ".", 
-                extract_prompt: bool = False, ai_model: str = DEFAULT_MODEL) -> dict:
+def fetch_tweet(url: str, download_images: bool = True, output_dir: str = ".",
+                extract_prompt: bool = False, ai_model: str = DEFAULT_MODEL,
+                detect_ads: bool = True) -> dict:
     """
     获取推文内容的主函数
     会依次尝试不同的方法直到成功
-    
+
     Args:
         url: 推文 URL
         download_images: 是否下载图片
         output_dir: 输出目录
         extract_prompt: 是否使用 AI 提取提示词
         ai_model: AI 模型名称 (openai, deepseek 等)
+        detect_ads: 是否检测广告内容 (默认 True)
+
+    Returns:
+        dict: 包含以下字段:
+            - text: 推文文本
+            - images: 图片 URL 列表
+            - is_advertisement: 是否为广告 (仅当 detect_ads=True)
+            - prompt_location: "post" | "reply" | "advertisement"
+            - extracted_prompt: 提取的 prompt (仅当 extract_prompt=True)
+            - ...
     """
     from datetime import datetime
     
@@ -595,7 +612,25 @@ def fetch_tweet(url: str, download_images: bool = True, output_dir: str = ".",
                 print(f"      ✗ 图片 {i+1} 下载失败: {e}")
         
         result["downloaded_images"] = downloaded_images
-    
+
+    # 初始化广告标记
+    result["is_advertisement"] = False
+
+    # 独立的广告检测（当 extract_prompt=False 但 detect_ads=True 时）
+    if detect_ads and not extract_prompt and result.get("text"):
+        print()
+        print(f"   🔍 广告检测...")
+        try:
+            ad_check = extract_prompt_with_ai(result["text"], model=ai_model)
+            if ad_check == "Advertisement":
+                print(f"      🚫 检测到广告/推广内容")
+                result["is_advertisement"] = True
+                result["prompt_location"] = "advertisement"
+            else:
+                print(f"      ✓ 非广告内容")
+        except Exception as e:
+            print(f"      ⚠️ 广告检测失败: {e}")
+
     # 使用 AI 提取提示词
     if extract_prompt and result.get("text"):
         print()
@@ -616,7 +651,12 @@ def fetch_tweet(url: str, download_images: bool = True, output_dir: str = ".",
             result["extracted_prompt"] = extracted_prompt
 
             # 处理不同的提取结果
-            if extracted_prompt == "Prompt in reply":
+            if extracted_prompt == "Advertisement":
+                print(f"      🚫 检测到广告/推广内容，跳过")
+                result["is_advertisement"] = True
+                result["prompt_location"] = "advertisement"
+                result["classification"] = None
+            elif extracted_prompt == "Prompt in reply":
                 print(f"      ⚠️ Prompt 在评论/回复中，尝试获取作者回复...")
                 result["prompt_location"] = "reply"
 
@@ -725,7 +765,15 @@ def fetch_tweet(url: str, download_images: bool = True, output_dir: str = ".",
     extracted_prompt = result.get("extracted_prompt", "")
 
     # 判断是否成功提取了 prompt (即使是从评论中提取的)
-    has_valid_prompt = extracted_prompt and extracted_prompt not in ["No prompt found", "Prompt in reply"]
+    has_valid_prompt = extracted_prompt and extracted_prompt not in ["No prompt found", "Prompt in reply", "Advertisement"]
+
+    if prompt_location == "advertisement":
+        print(f"🚫 [ADVERTISEMENT] 推文为广告内容，已跳过: {url}")
+        print(f"   用户: @{username} | 推文ID: {tweet_id}")
+        print(f"   获取方式: {fetch_method}")
+        print(f"   耗时: {elapsed:.1f}s")
+        print("=" * 70)
+        return result
 
     if has_valid_prompt:
         if prompt_location == "reply":

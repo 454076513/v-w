@@ -470,6 +470,11 @@ def process_opennana_item(db: Database, item: Dict, skip_twitter: bool = False, 
             twitter_images = result.get("images", []) if result else []
             
             if twitter_images and len(twitter_images) > 0:
+                # 检测是否为广告 (由 fetch_tweet 统一处理)
+                if result.get("is_advertisement"):
+                    print(f"   🚫 检测到广告内容，跳过")
+                    return {"success": False, "method": "skipped", "error": "Advertisement content detected", "twitter_failed": False}
+
                 # 使用 Twitter 的高清图片
                 final_images = twitter_images[:5]
                 print(f"   ✅ 获取到 {len(final_images)} 张 Twitter 图片")

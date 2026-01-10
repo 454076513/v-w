@@ -164,8 +164,12 @@ def process_item(db: Database, item: Dict, dry_run: bool = False) -> Dict[str, A
     if not images:
         return {"success": False, "method": "twitter_failed", "error": "No images from Twitter", "twitter_failed": True}
 
+    # 检查是否为广告 (由 fetch_tweet 统一处理)
+    if result.get("is_advertisement"):
+        return {"success": False, "method": "skipped", "error": "Advertisement content detected"}
+
     # 没有 AI 提取的提示词则跳过
-    if not prompt or prompt == "No prompt found":
+    if not prompt or prompt in ["No prompt found", "Advertisement"]:
         return {"success": False, "method": "skipped", "error": "No extracted prompt (AI extraction failed)"}
 
     # AI 分类 - 必须使用 AI 结果，失败则跳过

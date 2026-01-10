@@ -385,13 +385,24 @@ def map_category(classification: Dict) -> str:
 
 # ========== 主流程 ==========
 
-def process_twitter_url(db: Database, tweet_url: str) -> bool:
-    """处理单个 Twitter URL: 抓取 → 提取提示词 → 入库"""
-    
+def process_twitter_url(db: Database, tweet_url: str) -> str:
+    """
+    处理单个 Twitter URL: 抓取 → 提取提示词 → 入库
+
+    Returns:
+        str: 处理结果状态
+        - "saved": 成功保存
+        - "exists": 已存在
+        - "advertisement": 广告内容
+        - "no_prompt": 未找到 prompt
+        - "prompt_in_reply": prompt 在评论中
+        - "failed": 处理失败
+    """
+
     # 检查是否已存在
     if db.prompt_exists(tweet_url):
         print(f"   ⏭️ 已存在，跳过")
-        return False
+        return "exists"
     
     try:
         # 抓取推文内容
@@ -404,22 +415,27 @@ def process_twitter_url(db: Database, tweet_url: str) -> bool:
         
         if not result:
             print(f"   ❌ 抓取失败")
-            return False
-        
+            return "failed"
+
         extracted_prompt = result.get("extracted_prompt", "")
         classification = result.get("classification") or {}
         images = result.get("images", [])
         prompt_location = result.get("prompt_location", "unknown")
 
+        # 检查是否为广告 (由 fetch_tweet 统一处理)
+        if result.get("is_advertisement"):
+            print(f"   🚫 检测到广告/推广内容，跳过")
+            return "advertisement"
+
         # 检查是否成功提取提示词
         if extracted_prompt == "Prompt in reply":
             print(f"   ⚠️ Prompt 在评论/回复中，主帖子不包含实际 prompt")
             print(f"   [Info] 需要手动获取评论内容: {tweet_url}")
-            return False
+            return "prompt_in_reply"
 
         if not extracted_prompt or extracted_prompt == "No prompt found":
             print(f"   ⚠️ 未找到提示词")
-            return False
+            return "no_prompt"
         
         # 准备数据
         # 从分类结果获取 title
@@ -470,14 +486,14 @@ def process_twitter_url(db: Database, tweet_url: str) -> bool:
         
         if prompt_record:
             print(f"   ✅ 已保存: {title}")
-            return True
+            return "saved"
         else:
             print(f"   ❌ 保存失败")
-            return False
-            
+            return "failed"
+
     except Exception as e:
         print(f"   ❌ 处理失败: {e}")
-        return False
+        return "failed"
 
 
 def process_single_url(tweet_url: str):
@@ -498,14 +514,22 @@ def process_single_url(tweet_url: str):
     try:
         db.connect()
         print("✅ 数据库连接成功\n")
-        
-        success = process_twitter_url(db, tweet_url)
-        
+
+        result = process_twitter_url(db, tweet_url)
+
         print("\n" + "=" * 60)
-        if success:
+        if result == "saved":
             print("✅ 处理完成")
+        elif result == "exists":
+            print("⏭️ 已存在，跳过")
+        elif result == "advertisement":
+            print("🚫 广告内容，已跳过")
+        elif result == "no_prompt":
+            print("⚠️ 未找到提示词")
+        elif result == "prompt_in_reply":
+            print("⚠️ Prompt 在评论中")
         else:
-            print("⚠️ 处理未完成 (可能已存在或无提示词)")
+            print("❌ 处理失败")
         print("=" * 60)
         
     finally:
@@ -556,6 +580,7 @@ def run_full_pipeline():
         "twitter_success": 0,
         "twitter_failed": 0,
         "twitter_exists": 0,
+        "twitter_ads": 0,
         "prompts_saved": 0,
     }
     
@@ -609,18 +634,27 @@ def run_full_pipeline():
             print()
             for j, url in enumerate(twitter_links, 1):
                 print(f"   🐦 处理链接 [{j}/{len(twitter_links)}]: {url}")
-                
+
                 try:
                     result = process_twitter_url(db, url)
-                    if result:
+                    if result == "saved":
                         stats["prompts_saved"] += 1
                         stats["twitter_success"] += 1
                         success_urls.append(url)
                         print(f"      ✅ 结果: 成功保存")
-                    else:
-                        # 可能是已存在或无提示词
+                    elif result == "advertisement":
+                        stats["twitter_ads"] += 1
+                        print(f"      🚫 结果: 广告内容，跳过")
+                    elif result == "exists":
                         stats["twitter_exists"] += 1
-                        print(f"      ⏭️ 结果: 跳过 (已存在或无提示词)")
+                        print(f"      ⏭️ 结果: 已存在，跳过")
+                    elif result in ["no_prompt", "prompt_in_reply"]:
+                        stats["twitter_exists"] += 1
+                        print(f"      ⏭️ 结果: 跳过 (无提示词)")
+                    else:
+                        stats["twitter_failed"] += 1
+                        failed_urls.append({"url": url, "error": "处理失败"})
+                        print(f"      ❌ 结果: 处理失败")
                 except Exception as e:
                     stats["twitter_failed"] += 1
                     failed_urls.append({"url": url, "error": str(e)})
@@ -652,6 +686,7 @@ def run_full_pipeline():
         print(f"   总计: {stats['twitter_links']}")
         print(f"   ✅ 成功: {stats['twitter_success']}")
         print(f"   ⏭️ 跳过: {stats['twitter_exists']}")
+        print(f"   🚫 广告: {stats['twitter_ads']}")
         print(f"   ❌ 失败: {stats['twitter_failed']}")
         print()
         print("💾 数据库:")

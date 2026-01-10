@@ -534,6 +534,12 @@ async def process_tweet(db: Database, tweet: Dict, state: Dict,
         print(f"   [AI] Extracting prompt...")
         extracted_prompt = extract_prompt_with_ai(text, model=AI_MODEL)
 
+        # 检查是否为广告
+        if extracted_prompt == "Advertisement":
+            print(f"   [Skip] Advertisement content detected")
+            mark_tweet_processed(state, tweet_id)
+            return False
+
         # 检查是否提取失败
         invalid_prompts = [
             "No prompt found",
