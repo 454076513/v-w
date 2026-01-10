@@ -54,7 +54,11 @@ from main import Database, process_twitter_url, map_category, AI_MODEL
 from fetch_twitter_content import classify_prompt_with_ai, extract_username
 
 # ========== 配置 ==========
-OPENNANA_JSON_URL = "https://opennana.com/awesome-prompt-gallery/data/prompts.json"
+# 新 API 端点
+OPENNANA_API_BASE = "https://api.opennana.com/api/prompts"
+OPENNANA_LIST_API = OPENNANA_API_BASE  # GET ?page=1&limit=20&sort=created_at&order=DESC
+# 详情 API: GET https://api.opennana.com/api/prompts/{slug}
+
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 # 数据缓存目录
@@ -90,64 +94,260 @@ TAG_TO_CATEGORY = {
 }
 
 
-def fetch_opennana_data(force_refresh: bool = False) -> Optional[Dict]:
+def fetch_prompt_list(page: int = 1, limit: int = 100) -> Optional[Dict]:
     """
-    从 OpenNana 获取 JSON 数据，支持本地缓存
-    
+    获取 prompt 列表（单页）
+
+    Args:
+        page: 页码
+        limit: 每页数量
+
+    Returns:
+        API 响应数据或 None
+    """
+    url = f"{OPENNANA_LIST_API}?page={page}&limit={limit}&sort=created_at&order=DESC"
+
+    try:
+        response = requests.get(url, timeout=30, headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Referer": "https://opennana.com/",
+            "Origin": "https://opennana.com"
+        })
+        response.raise_for_status()
+        data = response.json()
+
+        if data.get("status") == 200:
+            return data.get("data", {})
+        else:
+            print(f"❌ API 返回错误: {data.get('msg', 'Unknown error')}")
+            return None
+    except Exception as e:
+        print(f"❌ 获取列表失败 (page={page}): {e}")
+        return None
+
+
+def fetch_prompt_detail(slug: str) -> Optional[Dict]:
+    """
+    获取单个 prompt 的详情
+
+    Args:
+        slug: prompt 的 slug，如 "prompt-1128"
+
+    Returns:
+        详情数据或 None
+    """
+    url = f"{OPENNANA_API_BASE}/{slug}"
+
+    try:
+        response = requests.get(url, timeout=30, headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Referer": "https://opennana.com/",
+            "Origin": "https://opennana.com"
+        })
+        response.raise_for_status()
+        data = response.json()
+
+        if data.get("status") == 200:
+            return data.get("data", {})
+        else:
+            return None
+    except Exception as e:
+        print(f"⚠️ 获取详情失败 ({slug}): {e}")
+        return None
+
+
+def fetch_opennana_data(force_refresh: bool = False, fetch_details: bool = True, max_items: int = None, max_pages: int = 2, page_size: int = 20) -> Optional[Dict]:
+    """
+    从 OpenNana 新 API 获取数据，支持本地缓存
+
     Args:
         force_refresh: 强制从远程获取，忽略本地缓存
+        fetch_details: 是否获取详情（用于完整导入）
+        max_items: 最大获取数量（用于测试），None 表示不限制
+        max_pages: 最大获取页数（默认 2）
+        page_size: 每页获取数量（默认 20）
+
+    Returns:
+        格式化的数据: {"total": int, "items": [...]}
     """
     # 创建缓存目录
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    
+
     # 检查本地缓存
     if not force_refresh and PROMPTS_CACHE_FILE.exists():
         try:
             with open(PROMPTS_CACHE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            
+
             total = data.get("total", len(data.get("items", [])))
             cache_time = PROMPTS_CACHE_FILE.stat().st_mtime
             cache_date = datetime.fromtimestamp(cache_time).strftime("%Y-%m-%d %H:%M:%S")
-            
+
             print(f"📦 使用本地缓存: {PROMPTS_CACHE_FILE}")
             print(f"   缓存时间: {cache_date}")
             print(f"   共 {total} 条记录")
             print(f"   (使用 --refresh 强制更新缓存)")
-            
+
             return data
         except Exception as e:
             print(f"⚠️ 读取缓存失败: {e}，重新获取...")
-    
-    # 从远程获取
-    print(f"📡 正在获取: {OPENNANA_JSON_URL}")
-    
+
+    # 从新 API 获取数据
+    print(f"📡 正在从新 API 获取数据...")
+    print(f"   列表 API: {OPENNANA_LIST_API}")
+    print(f"   配置: max_pages={max_pages}, page_size={page_size}")
+
+    all_items = []
+    page = 1
+    limit = page_size  # 每页获取数量
+
+    # 1. 先获取所有列表数据
+    while True:
+        print(f"   📄 获取列表第 {page} 页...")
+        list_data = fetch_prompt_list(page=page, limit=limit)
+
+        if not list_data:
+            break
+
+        items = list_data.get("items", [])
+        pagination = list_data.get("pagination", {})
+
+        if not items:
+            break
+
+        all_items.extend(items)
+
+        total_pages = pagination.get("total_pages", 1)
+        has_more = pagination.get("has_more", False)
+
+        print(f"      获取到 {len(items)} 条，共 {pagination.get('total', '?')} 条")
+
+        # 如果设置了最大数量限制，检查是否达到
+        if max_items and len(all_items) >= max_items:
+            all_items = all_items[:max_items]
+            print(f"   ⚡ 达到最大数量限制 ({max_items})，停止获取列表")
+            break
+
+        # 如果设置了最大页数限制，检查是否达到
+        if max_pages and page >= max_pages:
+            print(f"   ⚡ 达到最大页数限制 ({max_pages} 页)，停止获取列表")
+            break
+
+        if not has_more or page >= total_pages:
+            break
+
+        page += 1
+
+    if not all_items:
+        print("❌ 未获取到任何数据")
+        return None
+
+    print(f"✅ 列表获取完成: 共 {len(all_items)} 条")
+
+    # 2. 获取详情（如果需要）
+    if fetch_details:
+        print(f"📡 正在获取详情...")
+        detailed_items = []
+
+        for i, item in enumerate(all_items, 1):
+            slug = item.get("slug")
+            if not slug:
+                continue
+
+            if i % 50 == 0 or i == len(all_items):
+                print(f"   进度: {i}/{len(all_items)}")
+
+            detail = fetch_prompt_detail(slug)
+            if detail:
+                # 转换为兼容旧格式的数据结构
+                converted = convert_to_legacy_format(detail)
+                detailed_items.append(converted)
+            else:
+                # 详情获取失败，使用列表中的基础数据
+                detailed_items.append({
+                    "id": item.get("id"),
+                    "slug": slug,
+                    "title": item.get("title", "Untitled"),
+                    "images": [item.get("cover_image")] if item.get("cover_image") else [],
+                    "prompts": [],
+                    "tags": [],
+                    "source": None
+                })
+
+        all_items = detailed_items
+        print(f"✅ 详情获取完成: {len(detailed_items)} 条")
+
+    # 构建返回数据
+    result = {
+        "total": len(all_items),
+        "items": all_items
+    }
+
+    # 保存到本地缓存
     try:
-        response = requests.get(OPENNANA_JSON_URL, timeout=60)
-        response.raise_for_status()
-        data = response.json()
-        
-        total = data.get("total", len(data.get("items", [])))
-        print(f"✅ 获取成功: 共 {total} 条记录")
-        
-        # 保存到本地缓存
-        try:
-            with open(PROMPTS_CACHE_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            print(f"💾 已缓存到: {PROMPTS_CACHE_FILE}")
-        except Exception as e:
-            print(f"⚠️ 保存缓存失败: {e}")
-        
-        return data
-    except requests.exceptions.Timeout:
-        print("❌ 请求超时")
-        return None
-    except requests.exceptions.RequestException as e:
-        print(f"❌ 请求失败: {e}")
-        return None
-    except json.JSONDecodeError as e:
-        print(f"❌ JSON 解析失败: {e}")
-        return None
+        with open(PROMPTS_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        print(f"💾 已缓存到: {PROMPTS_CACHE_FILE}")
+    except Exception as e:
+        print(f"⚠️ 保存缓存失败: {e}")
+
+    return result
+
+
+def convert_to_legacy_format(detail: Dict) -> Dict:
+    """
+    将新 API 的详情数据转换为兼容旧格式的数据结构
+
+    新 API 字段:
+        - source_url: Twitter/X 链接
+        - source_name: 作者名
+        - prompts: [{text, type}] 数组
+        - images: 图片 URL 数组
+        - tags: 标签数组
+
+    旧格式字段:
+        - source: {url, name}
+        - prompts: [string] 数组
+        - images: [string] 数组 (相对路径)
+        - tags: [string] 数组
+    """
+    # 提取提示词文本（优先英文，否则中文）
+    prompts_data = detail.get("prompts", [])
+    prompt_texts = []
+
+    # 优先使用英文提示词
+    for p in prompts_data:
+        if p.get("type") == "en" and p.get("text"):
+            prompt_texts.append(p["text"])
+            break
+
+    # 如果没有英文，使用中文
+    if not prompt_texts:
+        for p in prompts_data:
+            if p.get("text"):
+                prompt_texts.append(p["text"])
+                break
+
+    # 构建 source 对象
+    source = None
+    if detail.get("source_url"):
+        source = {
+            "url": detail.get("source_url"),
+            "name": detail.get("source_name", "")
+        }
+
+    return {
+        "id": detail.get("id"),
+        "slug": detail.get("slug"),
+        "title": detail.get("title", "Untitled"),
+        "prompts": prompt_texts,
+        "images": detail.get("images", []),
+        "tags": detail.get("tags", []),
+        "source": source,
+        "model": detail.get("model"),
+        # 保留原始数据供需要时使用
+        "_raw_prompts": prompts_data
+    }
 
 
 def load_progress() -> Dict:
@@ -234,15 +434,8 @@ def process_opennana_item(db: Database, item: Dict, skip_twitter: bool = False, 
     if not prompt_text:
         return {"success": False, "method": "skipped", "error": "No prompt text", "twitter_failed": False}
     
-    # 获取图片 URL（OpenNana 的图片作为备用）
-    images = item.get("images", [])
-    base_url = "https://opennana.com/awesome-prompt-gallery/data/"
-    fallback_images = []
-    for img in images:
-        if img.startswith("http"):
-            fallback_images.append(img)
-        else:
-            fallback_images.append(base_url + img)
+    # 获取图片 URL（新 API 返回完整 URL）
+    fallback_images = item.get("images", [])
     
     # source link: 优先用 Twitter URL，否则用 source URL
     source_link = twitter_url or source.get("url", "")
@@ -404,12 +597,13 @@ def save_failed_twitter_items(failed_twitter_items: List[Dict], timestamp: str):
     return filepath
 
 
-def run_import(limit: int = None, skip_twitter: bool = False, dry_run: bool = False, 
+def run_import(limit: int = None, skip_twitter: bool = False, dry_run: bool = False,
                only_twitter: bool = False, start_id: int = None, force_refresh: bool = False,
-               resume: bool = True, reset_progress: bool = False):
+               resume: bool = True, reset_progress: bool = False,
+               max_pages: int = 2, page_size: int = 20):
     """
     运行导入流程
-    
+
     Args:
         limit: 限制处理数量
         skip_twitter: 跳过 Twitter 处理
@@ -419,11 +613,14 @@ def run_import(limit: int = None, skip_twitter: bool = False, dry_run: bool = Fa
         force_refresh: 强制刷新缓存
         resume: 断点续传（默认开启）
         reset_progress: 重置进度
+        max_pages: 最大获取页数
+        page_size: 每页获取数量
     """
     print("=" * 70)
     print("📦 OpenNana Prompt Gallery 导入")
     print("=" * 70)
-    print(f"数据源: {OPENNANA_JSON_URL}")
+    print(f"数据源: {OPENNANA_API_BASE}")
+    print(f"获取配置: max_pages={max_pages}, page_size={page_size}")
     print(f"跳过 Twitter 处理: {skip_twitter}")
     print(f"仅处理有 X 来源的: {only_twitter}")
     print(f"预览模式: {dry_run}")
@@ -444,7 +641,7 @@ def run_import(limit: int = None, skip_twitter: bool = False, dry_run: bool = Fa
         sys.exit(1)
     
     # 获取数据（支持缓存）
-    data = fetch_opennana_data(force_refresh=force_refresh)
+    data = fetch_opennana_data(force_refresh=force_refresh, max_pages=max_pages, page_size=page_size)
     if not data:
         sys.exit(1)
     
@@ -539,16 +736,9 @@ def run_import(limit: int = None, skip_twitter: bool = False, dry_run: bool = Fa
             # 记录 Twitter 处理失败的条目
             if result.get("twitter_failed"):
                 stats["twitter_failed"] += 1
-                
-                # 构建完整图片 URL
-                base_url = "https://opennana.com/awesome-prompt-gallery/data/"
+
+                # 新 API 返回的是完整图片 URL
                 images = item.get("images", [])
-                full_images = []
-                for img in images:
-                    if img.startswith("http"):
-                        full_images.append(img)
-                    else:
-                        full_images.append(base_url + img)
                 
                 failed_twitter_items.append({
                     "id": item_id,
@@ -559,7 +749,7 @@ def run_import(limit: int = None, skip_twitter: bool = False, dry_run: bool = Fa
                     # 用于人工处理的关键数据
                     "prompt_preview": (item.get("prompts", [""])[0][:200] + "...") if item.get("prompts") else None,
                     "full_prompt": item.get("prompts", [""])[0] if item.get("prompts") else None,  # 完整提示词
-                    "images": full_images[:5],  # 保留前5张图片URL
+                    "images": images[:5],  # 保留前5张图片URL
                     "tags": item.get("tags", []),
                     "model": item.get("model"),
                     "source_name": (item.get("source") or {}).get("name"),
@@ -695,9 +885,13 @@ def main():
                         help="禁用断点续传，处理所有条目")
     parser.add_argument("--reset", action="store_true",
                         help="重置进度，从头开始处理")
-    
+    parser.add_argument("--max-pages", type=int, default=2,
+                        help="最大获取页数 (默认: 2)")
+    parser.add_argument("--page-size", type=int, default=20,
+                        help="每页获取数量 (默认: 20)")
+
     args = parser.parse_args()
-    
+
     run_import(
         limit=args.limit,
         skip_twitter=args.skip_twitter,
@@ -706,7 +900,9 @@ def main():
         start_id=args.start_id,
         force_refresh=args.refresh,
         resume=not args.no_resume,
-        reset_progress=args.reset
+        reset_progress=args.reset,
+        max_pages=args.max_pages,
+        page_size=args.page_size
     )
 
 

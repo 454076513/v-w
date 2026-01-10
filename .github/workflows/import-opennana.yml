@@ -30,6 +30,16 @@ on:
         required: false
         type: boolean
         default: false
+      max_pages:
+        description: "最大获取页数"
+        required: false
+        type: number
+        default: 2
+      page_size:
+        description: "每页获取数量"
+        required: false
+        type: number
+        default: 20
 
 jobs:
   import:
@@ -73,7 +83,7 @@ jobs:
           GITEE_AI_API_KEY: ${{ secrets.GITEE_AI_API_KEY }}
         run: |
           cd worker
-          python import_opennana.py --only-twitter --limit 50 --refresh
+          python import_opennana.py --only-twitter --refresh --max-pages 2 --page-size 20
 
       - name: Run import (manual)
         if: github.event_name == 'workflow_dispatch'
@@ -87,7 +97,9 @@ jobs:
             ${{ inputs.skip_twitter && '--skip-twitter' || '' }} \
             ${{ inputs.refresh && '--refresh' || '' }} \
             ${{ inputs.reset && '--reset' || '' }} \
-            ${{ inputs.limit && format('--limit {0}', inputs.limit) || '' }}
+            ${{ inputs.limit && format('--limit {0}', inputs.limit) || '' }} \
+            --max-pages ${{ inputs.max_pages }} \
+            --page-size ${{ inputs.page_size }}
 
       - name: Upload failed imports
         if: always()
