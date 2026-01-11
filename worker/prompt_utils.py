@@ -674,6 +674,87 @@ Example response:
 
 # ========== 便捷函数 ==========
 
+def extract_and_validate_prompt(raw_text: str, model: str = DEFAULT_MODEL) -> dict:
+    """
+    统一的 prompt 提取和验证函数（供导入脚本使用）
+
+    对原始文本进行 AI 提取，并验证结果是否有效。
+
+    Args:
+        raw_text: 原始文本内容
+        model: AI 模型名称
+
+    Returns:
+        dict: {
+            "success": bool,           # 是否成功提取到有效 prompt
+            "prompt": str or None,     # 提取的 prompt（成功时）
+            "method": str,             # 提取方法: "regex" | "ai"
+            "error": str or None       # 错误信息（失败时）
+        }
+    """
+    if not raw_text or not raw_text.strip():
+        return {
+            "success": False,
+            "prompt": None,
+            "method": None,
+            "error": "Empty input text"
+        }
+
+    try:
+        result = extract_prompt(raw_text, model=model, use_ai=True)
+        prompt = result.get("prompt")
+        method = result.get("method", "unknown")
+
+        # 检查特殊返回值
+        if not prompt:
+            return {
+                "success": False,
+                "prompt": None,
+                "method": method,
+                "error": "AI extraction returned empty"
+            }
+
+        if prompt == "Advertisement":
+            return {
+                "success": False,
+                "prompt": None,
+                "method": method,
+                "error": "Advertisement content"
+            }
+
+        if prompt == "Prompt in reply":
+            return {
+                "success": False,
+                "prompt": None,
+                "method": method,
+                "error": "Prompt in reply"
+            }
+
+        if prompt == "No prompt found":
+            return {
+                "success": False,
+                "prompt": None,
+                "method": method,
+                "error": "No prompt found by AI"
+            }
+
+        # 成功
+        return {
+            "success": True,
+            "prompt": prompt,
+            "method": method,
+            "error": None
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "prompt": None,
+            "method": None,
+            "error": f"AI extraction failed: {e}"
+        }
+
+
 def process_text(text: str, model: str = DEFAULT_MODEL, classify: bool = True) -> dict:
     """
     一站式处理：提取提示词并分类

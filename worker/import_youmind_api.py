@@ -49,6 +49,7 @@ from main import Database, AI_MODEL
 
 # AI 处理适配函数 (统一使用 prompt_utils)
 from fetch_twitter_content import classify_prompt_with_ai, extract_username
+from prompt_utils import extract_and_validate_prompt
 
 # ========== 配置 ==========
 YOUMIND_API_URL = "https://youmind.com/youhome-api/prompts"
@@ -366,7 +367,7 @@ def process_youmind_item(db: Database, item: Dict, skip_twitter: bool = False, d
     处理单个 YouMind 提示词
 
     策略:
-    - 提示词: 优先使用 content（原始），否则用 translatedContent（翻译）
+    - 提示词: 必须经过 AI 提取清洗
     - 标题/分类/标签: 用 AI 解析
     - 图片: 优先从 Twitter 获取高清图，失败则用 YouMind 的图片
     - 来源: 标记为 'youmind'
@@ -376,10 +377,10 @@ def process_youmind_item(db: Database, item: Dict, skip_twitter: bool = False, d
     item_id = item.get("id", "unknown")
     json_title = item.get("title", "Untitled")
 
-    # 优先使用 content（原始提示词），如果没有则用 translatedContent（英文翻译）
-    prompt_text = item.get("content") or item.get("translatedContent") or item.get("description")
+    # 获取原始提示词
+    raw_prompt = item.get("content") or item.get("translatedContent") or item.get("description")
 
-    if not prompt_text:
+    if not raw_prompt:
         return {"success": False, "method": "skipped", "error": "No prompt text", "twitter_failed": False}
 
     # 获取图片 URL（YouMind 的图片作为备用）
@@ -434,6 +435,16 @@ def process_youmind_item(db: Database, item: Dict, skip_twitter: bool = False, d
     if source_link and db.prompt_exists(source_link):
         return {"success": False, "method": "skipped", "error": "Already exists", "twitter_failed": False}
 
+    # AI 提取清洗 prompt（必须步骤）
+    print(f"   🤖 AI 提取 prompt...")
+    extract_result = extract_and_validate_prompt(raw_prompt, model=AI_MODEL)
+    if not extract_result["success"]:
+        print(f"   ❌ AI 提取失败: {extract_result['error']}")
+        return {"success": False, "method": "skipped", "error": extract_result["error"], "twitter_failed": False}
+
+    prompt_text = extract_result["prompt"]
+    print(f"   ✅ AI 提取成功 ({extract_result['method']}): {prompt_text[:60]}...")
+
     # 用于最终入库的数据
     final_title = json_title
     final_category = infer_category_from_tags(tags)
@@ -452,7 +463,7 @@ def process_youmind_item(db: Database, item: Dict, skip_twitter: bool = False, d
             result = fetch_tweet(
                 twitter_url,
                 download_images=False,
-                extract_prompt=False,  # 不需要提取提示词，使用 YouMind 的
+                extract_prompt=False,  # prompt 已在前面用 AI 提取
                 ai_model=AI_MODEL
             )
 

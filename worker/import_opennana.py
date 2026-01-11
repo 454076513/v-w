@@ -52,6 +52,7 @@ from main import Database, process_twitter_url, map_category, AI_MODEL
 
 # AI 处理适配函数 (统一使用 prompt_utils)
 from fetch_twitter_content import classify_prompt_with_ai, extract_username
+from prompt_utils import extract_and_validate_prompt
 
 # ========== 配置 ==========
 # 新 API 端点
@@ -412,26 +413,26 @@ def infer_category_from_tags(tags: List[str]) -> str:
 def process_opennana_item(db: Database, item: Dict, skip_twitter: bool = False, dry_run: bool = False) -> Dict[str, Any]:
     """
     处理单个 OpenNana 条目
-    
+
     策略:
-    - 提示词: 直接使用 OpenNana JSON 里的原始数据
+    - 提示词: 必须经过 AI 提取清洗
     - 标题/分类/标签: 用 AI 解析
     - 图片: 优先从 Twitter 获取高清图，失败则用 OpenNana 的图片
-    
+
     返回: {"success": bool, "method": str, "error": str or None, "twitter_failed": bool}
     """
     item_id = item.get("id", "unknown")
     json_title = item.get("title", "Untitled")
     source = item.get("source") or {}
-    
+
     # 提取 Twitter URL
     twitter_url = extract_twitter_url(source)
-    
-    # 获取提示词（直接使用 OpenNana 的数据）
+
+    # 获取原始提示词
     prompts = item.get("prompts", [])
-    prompt_text = prompts[0] if prompts else ""
-    
-    if not prompt_text:
+    raw_prompt = prompts[0] if prompts else ""
+
+    if not raw_prompt:
         return {"success": False, "method": "skipped", "error": "No prompt text", "twitter_failed": False}
     
     # 获取图片 URL（新 API 返回完整 URL）
@@ -443,7 +444,17 @@ def process_opennana_item(db: Database, item: Dict, skip_twitter: bool = False, 
     # 检查是否已存在
     if source_link and db.prompt_exists(source_link):
         return {"success": False, "method": "skipped", "error": "Already exists", "twitter_failed": False}
-    
+
+    # AI 提取清洗 prompt（必须步骤）
+    print(f"   🤖 AI 提取 prompt...")
+    extract_result = extract_and_validate_prompt(raw_prompt, model=AI_MODEL)
+    if not extract_result["success"]:
+        print(f"   ❌ AI 提取失败: {extract_result['error']}")
+        return {"success": False, "method": "skipped", "error": extract_result["error"], "twitter_failed": False}
+
+    prompt_text = extract_result["prompt"]
+    print(f"   ✅ AI 提取成功 ({extract_result['method']}): {prompt_text[:60]}...")
+
     # 用于最终入库的数据
     final_title = json_title
     final_category = infer_category_from_tags(item.get("tags", []))
@@ -462,7 +473,7 @@ def process_opennana_item(db: Database, item: Dict, skip_twitter: bool = False, 
             result = fetch_tweet(
                 twitter_url,
                 download_images=False,
-                extract_prompt=False,  # 不需要提取提示词，使用 OpenNana 的
+                extract_prompt=False,  # prompt 已在前面用 AI 提取
                 ai_model=AI_MODEL
             )
             

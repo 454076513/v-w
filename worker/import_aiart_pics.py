@@ -52,6 +52,7 @@ except ImportError:
 # 导入主模块
 from main import Database, AI_MODEL
 from fetch_twitter_content import fetch_tweet, classify_prompt_with_ai, extract_username
+from prompt_utils import extract_and_validate_prompt
 
 # ========== 配置 ==========
 BASE_URL = "https://aiart.pics"
@@ -169,16 +170,15 @@ def process_api_item(db: Database, api_data: Dict, dry_run: bool = False) -> Dic
     """
     处理 API 返回的单个条目
 
-    策略（与 import_opennana.py 一致）:
-    - 提示词: 直接使用 API 的原始数据
+    策略:
+    - 提示词: 必须经过 AI 提取清洗
     - 标题/分类/标签: 用 AI 解析
-    - 图片: 优先从 Twitter 获取高清图，失败则用 API 的图片
+    - 图片: 从 Twitter 获取高清图
 
     返回: {"success": bool, "method": str, "error": str or None, "twitter_failed": bool}
     """
     x_url = api_data.get("x_url", "")
-    prompt = api_data.get("prompt", "")
-    fallback_images = api_data.get("images", [])
+    raw_prompt = api_data.get("prompt", "")
     api_title = api_data.get("title", "")
     api_author = api_data.get("author", "")
     api_tags = api_data.get("tags", [])
@@ -186,12 +186,22 @@ def process_api_item(db: Database, api_data: Dict, dry_run: bool = False) -> Dic
     if not x_url:
         return {"success": False, "method": "skipped", "error": "No x_url", "twitter_failed": False}
 
-    if not prompt:
+    if not raw_prompt:
         return {"success": False, "method": "skipped", "error": "No prompt", "twitter_failed": False}
 
     # 检查是否已存在
     if db.prompt_exists(x_url):
         return {"success": False, "method": "skipped", "error": "Already exists", "twitter_failed": False}
+
+    # AI 提取清洗 prompt（必须步骤）
+    print(f"   🤖 AI 提取 prompt...")
+    extract_result = extract_and_validate_prompt(raw_prompt, model=AI_MODEL)
+    if not extract_result["success"]:
+        print(f"   ❌ AI 提取失败: {extract_result['error']}")
+        return {"success": False, "method": "skipped", "error": extract_result["error"], "twitter_failed": False}
+
+    prompt = extract_result["prompt"]
+    print(f"   ✅ AI 提取成功 ({extract_result['method']}): {prompt[:60]}...")
 
     # 用于最终入库的数据
     final_title = api_title
@@ -207,7 +217,7 @@ def process_api_item(db: Database, api_data: Dict, dry_run: bool = False) -> Dic
         result = fetch_tweet(
             x_url,
             download_images=False,
-            extract_prompt=False,  # 不需要提取提示词，使用 API 的
+            extract_prompt=False,  # prompt 已在前面用 AI 提取
             ai_model=AI_MODEL
         )
 
