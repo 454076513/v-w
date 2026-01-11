@@ -43,7 +43,7 @@ except ImportError:
 
 # 导入主模块
 from main import Database, AI_MODEL
-from fetch_twitter_content import fetch_tweet, classify_prompt_with_ai, extract_username
+from prompt_utils import process_tweet_for_import
 
 # ========== 配置 ==========
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
@@ -127,112 +127,23 @@ def process_item(db: Database, item: Dict, dry_run: bool = False) -> Dict[str, A
     """
     处理单个条目
 
-    流程:
-    1. 从 Twitter 获取图片和内容
-    2. 使用 AI 分类
-    3. 写入数据库
+    流程: 使用统一处理函数 process_tweet_for_import
     """
-    slug = item.get("slug", "")
     x_url = item.get("x_url", "")
 
     if not x_url:
-        return {"success": False, "method": "skipped", "error": "No x_url"}
+        return {"success": False, "method": "skipped", "error": "No x_url", "twitter_failed": False}
 
-    # 检查是否已存在
-    if db.prompt_exists(x_url):
-        return {"success": False, "method": "skipped", "error": "Already exists"}
+    # 使用统一处理函数
+    result = process_tweet_for_import(
+        db=db,
+        tweet_url=x_url,
+        import_source="aiart_pics",
+        ai_model=AI_MODEL,
+        dry_run=dry_run
+    )
 
-    # 从 Twitter 获取数据
-    print(f"   🐦 从 Twitter 获取数据...")
-    try:
-        result = fetch_tweet(
-            x_url,
-            download_images=False,
-            extract_prompt=True,
-            ai_model=AI_MODEL
-        )
-    except Exception as e:
-        return {"success": False, "method": "twitter_failed", "error": str(e), "twitter_failed": True}
-
-    if not result:
-        return {"success": False, "method": "twitter_failed", "error": "fetch_tweet returned None", "twitter_failed": True}
-
-    # 提取数据 - 只使用 AI 提取的提示词，不使用原文
-    images = result.get("images", [])
-    prompt = result.get("extracted_prompt", "")
-
-    if not images:
-        return {"success": False, "method": "twitter_failed", "error": "No images from Twitter", "twitter_failed": True}
-
-    # 检查是否为广告 (由 fetch_tweet 统一处理)
-    if result.get("is_advertisement"):
-        return {"success": False, "method": "skipped", "error": "Advertisement content detected"}
-
-    # 没有 AI 提取的提示词则跳过
-    if not prompt or prompt in ["No prompt found", "Advertisement"]:
-        return {"success": False, "method": "skipped", "error": "No extracted prompt (AI extraction failed)"}
-
-    # AI 分类 - 必须使用 AI 结果，失败则跳过
-    print(f"   🤖 AI 分类...")
-    title = None
-    category = None
-    tags = []
-
-    try:
-        classification = classify_prompt_with_ai(prompt, AI_MODEL)
-        if classification:
-            ai_title = classification.get("title", "").strip()
-            if ai_title and ai_title != "Untitled Prompt":
-                title = ai_title
-
-            ai_category = classification.get("category", "").strip()
-            if ai_category:
-                category = ai_category
-
-            if classification.get("sub_categories"):
-                tags = classification["sub_categories"][:5]
-
-            print(f"   ✅ AI 分类: {category}")
-    except Exception as e:
-        print(f"   ⚠️ AI 分类失败: {e}")
-
-    # AI 分类失败则跳过
-    if not title or not category:
-        return {"success": False, "method": "skipped", "error": "AI classification failed (no title or category)"}
-
-    if dry_run:
-        print(f"   🔍 [Dry Run] 将入库:")
-        print(f"      标题: {title}")
-        print(f"      分类: {category}")
-        print(f"      标签: {tags}")
-        print(f"      图片: {len(images)}")
-        print(f"      提示词: {prompt[:80]}...")
-        return {"success": True, "method": "dry_run", "error": None}
-
-    # 提取作者并写入数据库
-    try:
-        author = extract_username(x_url)
-    except:
-        author = None
-
-    try:
-        record = db.save_prompt(
-            title=title,
-            prompt=prompt,
-            category=category,
-            tags=tags,
-            images=images[:5],
-            source_link=x_url,
-            author=author,
-            import_source="aiart_pics"
-        )
-
-        if record:
-            return {"success": True, "method": "imported", "error": None}
-        else:
-            return {"success": False, "method": "save_failed", "error": "Database save returned None"}
-    except Exception as e:
-        return {"success": False, "method": "save_failed", "error": str(e)}
+    return result
 
 
 def run_import(limit: int = None, dry_run: bool = False,

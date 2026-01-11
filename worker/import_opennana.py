@@ -48,11 +48,10 @@ except ImportError:
     pass
 
 # 导入主模块的数据库类和处理函数
-from main import Database, process_twitter_url, map_category, AI_MODEL
+from main import Database, AI_MODEL
 
 # AI 处理适配函数 (统一使用 prompt_utils)
-from fetch_twitter_content import classify_prompt_with_ai, extract_username
-from prompt_utils import extract_and_validate_prompt
+from prompt_utils import process_tweet_for_import
 
 # ========== 配置 ==========
 # 新 API 端点
@@ -412,17 +411,14 @@ def infer_category_from_tags(tags: List[str]) -> str:
 
 def process_opennana_item(db: Database, item: Dict, skip_twitter: bool = False, dry_run: bool = False) -> Dict[str, Any]:
     """
-    处理单个 OpenNana 条目
+    处理单个 OpenNana 条目 - 使用统一处理函数
 
     策略:
-    - 提示词: 必须经过 AI 提取清洗
-    - 标题/分类/标签: 用 AI 解析
-    - 图片: 优先从 Twitter 获取高清图，失败则用 OpenNana 的图片
+    - 必须有 Twitter URL 且能获取图片才入库
+    - 使用统一处理函数 process_tweet_for_import
 
     返回: {"success": bool, "method": str, "error": str or None, "twitter_failed": bool}
     """
-    item_id = item.get("id", "unknown")
-    json_title = item.get("title", "Untitled")
     source = item.get("source") or {}
 
     # 提取 Twitter URL
@@ -434,150 +430,22 @@ def process_opennana_item(db: Database, item: Dict, skip_twitter: bool = False, 
 
     if not raw_prompt:
         return {"success": False, "method": "skipped", "error": "No prompt text", "twitter_failed": False}
-    
-    # 获取图片 URL（新 API 返回完整 URL）
-    fallback_images = item.get("images", [])
-    
-    # source link: 优先用 Twitter URL，否则用 source URL
-    source_link = twitter_url or source.get("url", "")
-    
-    # 检查是否已存在
-    if source_link and db.prompt_exists(source_link):
-        return {"success": False, "method": "skipped", "error": "Already exists", "twitter_failed": False}
 
-    # AI 提取清洗 prompt（必须步骤）
-    print(f"   🤖 AI 提取 prompt...")
-    extract_result = extract_and_validate_prompt(raw_prompt, model=AI_MODEL)
-    if not extract_result["success"]:
-        print(f"   ❌ AI 提取失败: {extract_result['error']}")
-        return {"success": False, "method": "skipped", "error": extract_result["error"], "twitter_failed": False}
+    # 必须有 Twitter URL
+    if not twitter_url:
+        return {"success": False, "method": "skipped", "error": "No Twitter URL", "twitter_failed": False}
 
-    prompt_text = extract_result["prompt"]
-    print(f"   ✅ AI 提取成功 ({extract_result['method']}): {prompt_text[:60]}...")
+    # 使用统一处理函数
+    result = process_tweet_for_import(
+        db=db,
+        tweet_url=twitter_url,
+        raw_text=raw_prompt,
+        import_source="opennana",
+        ai_model=AI_MODEL,
+        dry_run=dry_run
+    )
 
-    # 用于最终入库的数据
-    final_title = json_title
-    final_category = infer_category_from_tags(item.get("tags", []))
-    final_tags = item.get("tags", [])[:5]
-    final_images = fallback_images[:5]
-    twitter_failed = False
-    twitter_error = None
-    
-    # 如果有 Twitter URL，尝试获取高清图片
-    if twitter_url and not skip_twitter:
-        print(f"   🐦 尝试从 Twitter 获取图片...")
-        
-        try:
-            from fetch_twitter_content import fetch_tweet
-            
-            result = fetch_tweet(
-                twitter_url,
-                download_images=False,
-                extract_prompt=False,  # prompt 已在前面用 AI 提取
-                ai_model=AI_MODEL
-            )
-            
-            # 检查是否成功获取到图片（图片数量必须 > 0）
-            twitter_images = result.get("images", []) if result else []
-            
-            if twitter_images and len(twitter_images) > 0:
-                # 检测是否为广告 (由 fetch_tweet 统一处理)
-                if result.get("is_advertisement"):
-                    print(f"   🚫 检测到广告内容，跳过")
-                    return {"success": False, "method": "skipped", "error": "Advertisement content detected", "twitter_failed": False}
-
-                # 使用 Twitter 的高清图片
-                final_images = twitter_images[:5]
-                print(f"   ✅ 获取到 {len(final_images)} 张 Twitter 图片")
-            else:
-                # 抓取成功但图片数量为 0，也算失败
-                twitter_failed = True
-                if result:
-                    twitter_error = "Twitter 抓取成功但无图片"
-                else:
-                    twitter_error = "Twitter 抓取失败"
-                print(f"   ⚠️ {twitter_error}，使用 OpenNana 图片")
-                
-        except Exception as e:
-            twitter_failed = True
-            twitter_error = str(e)
-            print(f"   ⚠️ Twitter 异常: {e}，使用 OpenNana 图片")
-    
-    # 使用 AI 解析标题、分类、标签
-    print(f"   🤖 AI 解析分类...")
-    try:
-        classification = classify_prompt_with_ai(prompt_text, AI_MODEL)
-        
-        if classification:
-            # 使用 AI 返回的标题（如果有效）
-            ai_title = classification.get("title", "").strip()
-            if ai_title and ai_title != "Untitled Prompt":
-                final_title = ai_title
-            
-            # 使用 AI 返回的分类
-            ai_category = classification.get("category", "").strip()
-            if ai_category:
-                final_category = ai_category
-            
-            # 使用 AI 返回的标签
-            ai_tags = classification.get("sub_categories", [])
-            if ai_tags and isinstance(ai_tags, list):
-                # 合并 AI 标签和原始标签，去重
-                combined_tags = list(dict.fromkeys(ai_tags + final_tags))
-                final_tags = combined_tags[:5]
-            
-            print(f"   ✅ AI 解析成功")
-    except Exception as e:
-        print(f"   ⚠️ AI 解析失败: {e}，使用原始数据")
-    
-    # 如果有 Twitter URL 但获取图片失败，不入库，只记录到失败文件
-    if twitter_url and twitter_failed:
-        print(f"   ❌ Twitter 图片获取失败，不入库，记录到失败文件")
-        return {
-            "success": False, 
-            "method": "twitter_failed", 
-            "error": twitter_error, 
-            "twitter_failed": True,
-            "twitter_error": twitter_error
-        }
-    
-    if dry_run:
-        print(f"   🔍 [Dry Run] 将入库:")
-        print(f"      标题: {final_title}")
-        print(f"      分类: {final_category}")
-        print(f"      标签: {final_tags}")
-        print(f"      图片: {len(final_images)}")
-        print(f"      提示词: {prompt_text[:80]}...")
-        return {"success": True, "method": "dry_run", "error": None, "twitter_failed": False}
-    
-    # 提取作者（如果有 Twitter URL）
-    author = None
-    if twitter_url:
-        try:
-            author = extract_username(twitter_url)
-        except:
-            pass
-
-    # 写入数据库
-    try:
-        record = db.save_prompt(
-            title=final_title,
-            prompt=prompt_text,
-            category=final_category,
-            tags=final_tags,
-            images=final_images,
-            source_link=source_link,
-            author=author,
-            import_source="opennana"  # 标记导入来源
-        )
-
-        if record:
-            method = "hybrid" if twitter_url else "json_direct"
-            return {"success": True, "method": method, "error": None, "twitter_failed": False}
-        else:
-            return {"success": False, "method": "save_failed", "error": "Database save returned None", "twitter_failed": False}
-    except Exception as e:
-        return {"success": False, "method": "save_failed", "error": str(e), "twitter_failed": False}
+    return result
 
 
 def save_failed_twitter_items(failed_twitter_items: List[Dict], timestamp: str):

@@ -49,6 +49,9 @@ except ImportError:
 # 导入 Twitter 抓取模块
 from fetch_twitter_content import fetch_tweet, extract_tweet_id, extract_username
 
+# 导入统一处理函数
+from prompt_utils import process_tweet_for_import
+
 # 数据库连接
 try:
     import psycopg2
@@ -398,101 +401,32 @@ def process_twitter_url(db: Database, tweet_url: str) -> str:
         - "prompt_in_reply": prompt 在评论中
         - "failed": 处理失败
     """
+    result = process_tweet_for_import(
+        db=db,
+        tweet_url=tweet_url,
+        import_source="gmail-grok",
+        ai_model=AI_MODEL
+    )
 
-    # 检查是否已存在
-    if db.prompt_exists(tweet_url):
+    # 映射返回值
+    if result["success"]:
+        return "saved"
+
+    error = result.get("error", "")
+    if error == "Already exists":
         print(f"   ⏭️ 已存在，跳过")
         return "exists"
-    
-    try:
-        # 抓取推文内容
-        result = fetch_tweet(
-            tweet_url,
-            download_images=False,
-            extract_prompt=True,
-            ai_model=AI_MODEL
-        )
-        
-        if not result:
-            print(f"   ❌ 抓取失败")
-            return "failed"
-
-        extracted_prompt = result.get("extracted_prompt", "")
-        classification = result.get("classification") or {}
-        images = result.get("images", [])
-        prompt_location = result.get("prompt_location", "unknown")
-
-        # 检查是否为广告 (由 fetch_tweet 统一处理)
-        if result.get("is_advertisement"):
-            print(f"   🚫 检测到广告/推广内容，跳过")
-            return "advertisement"
-
-        # 检查是否成功提取提示词
-        if extracted_prompt == "Prompt in reply":
-            print(f"   ⚠️ Prompt 在评论/回复中，主帖子不包含实际 prompt")
-            print(f"   [Info] 需要手动获取评论内容: {tweet_url}")
-            return "prompt_in_reply"
-
-        if not extracted_prompt or extracted_prompt == "No prompt found":
-            print(f"   ⚠️ 未找到提示词")
-            return "no_prompt"
-        
-        # 准备数据
-        # 从分类结果获取 title
-        title = classification.get("title", "").strip()
-        if not title or title == "Untitled Prompt":
-            # 如果没有 title，使用推文 ID
-            title = f"Tweet {extract_tweet_id(tweet_url)}"
-        
-        # 映射分类
-        category = map_category(classification)
-        
-        # 获取 tags (sub_categories 已经在 classify_prompt_with_ai 中处理过了)
-        tags = classification.get("sub_categories", [])
-        if not isinstance(tags, list):
-            tags = []
-        
-        # 确保 tags 是字符串列表
-        tags = [str(t).strip() for t in tags if t]
-        
-        # 去重
-        tags = list(dict.fromkeys(tags))
-        
-        # 调试日志
-        print(f"   📝 准备入库:")
-        print(f"      标题: {title}")
-        print(f"      分类: {category}")
-        print(f"      标签: {tags[:5]}")
-        print(f"      图片数: {len(images)}")
-        print(f"      提示词预览: {extracted_prompt[:100]}...")
-        
-        # 提取作者
-        try:
-            author = extract_username(tweet_url)
-        except:
-            author = None
-
-        # 写入数据库
-        prompt_record = db.save_prompt(
-            title=title,
-            prompt=extracted_prompt,
-            category=category,
-            tags=tags[:5],
-            images=images[:5],
-            source_link=tweet_url,
-            author=author,
-            import_source="gmail-grok"
-        )
-        
-        if prompt_record:
-            print(f"   ✅ 已保存: {title}")
-            return "saved"
-        else:
-            print(f"   ❌ 保存失败")
-            return "failed"
-
-    except Exception as e:
-        print(f"   ❌ 处理失败: {e}")
+    elif "Advertisement" in error:
+        return "advertisement"
+    elif "reply" in error.lower():
+        return "prompt_in_reply"
+    elif "No prompt" in error or "Prompt too short" in error:
+        return "no_prompt"
+    elif result.get("twitter_failed"):
+        print(f"   ❌ Twitter 抓取失败: {error}")
+        return "failed"
+    else:
+        print(f"   ❌ 处理失败: {error}")
         return "failed"
 
 

@@ -67,7 +67,7 @@ except ImportError:
     HAS_BS4 = False
 
 # 导入 AI 处理函数 (统一使用 prompt_utils)
-from prompt_utils import DEFAULT_MODEL, extract_prompt_with_replies, classify_prompt
+from prompt_utils import DEFAULT_MODEL, process_tweet_for_import
 
 # 导入 Twitter API 函数
 from fetch_twitter_content import (
@@ -1030,13 +1030,13 @@ class XMonitor:
 
 async def process_tweet(db: Database, tweet: Dict, state: Dict,
                         viral_only: bool = False, dry_run: bool = False) -> bool:
-    """处理单条推文
+    """处理单条推文 - 使用统一处理函数
 
     Args:
         db: 数据库连接
         tweet: 推文数据
         state: 处理状态
-        viral_only: 是否只处理爆款推文
+        viral_only: 是否只处理爆款推文 (保留用于兼容性，但不再使用)
         dry_run: 预览模式，不写入数据库
     """
     tweet_id = tweet["id"]
@@ -1052,120 +1052,38 @@ async def process_tweet(db: Database, tweet: Dict, state: Dict,
     if is_tweet_processed(state, tweet_id):
         return False
 
-    # 检查数据库是否已存在
-    if db.prompt_exists(tweet_url):
+    # 检查是否有图片
+    if not images:
         mark_tweet_processed(state, tweet_id)
         return False
 
-    # ========== 第一阶段: 特征匹配过滤 ==========
-    is_likely, likely_reason = is_likely_prompt_tweet(tweet)
-    if not is_likely:
-        # 静默跳过不太可能是提示词的推文
-        mark_tweet_processed(state, tweet_id)
-        # 返回特殊值表示被第一阶段过滤
-        return "filtered_stage1"
-
-    # 爆款判断
-    is_viral, viral_reason = is_viral_tweet(tweet)
-    viral_score = get_viral_score(tweet)
-
-    # 如果只要爆款，跳过非爆款
-    if viral_only and not is_viral:
-        mark_tweet_processed(state, tweet_id)
-        return False
-
-    # 显示推文信息 (通过第一阶段筛选的)
-    viral_badge = "🔥 VIRAL" if is_viral else ""
-    print(f"\n   [Tweet] @{username} - {tweet_id} {viral_badge}")
-    print(f"   Match: {likely_reason}")
+    # 显示推文信息
+    print(f"\n   [Tweet] @{username} - {tweet_id}")
     print(f"   Text: {text[:100]}...")
-    print(f"   Stats: ❤️ {likes:,} | 🔁 {retweets:,} | 👁️ {views:,} | Score: {viral_score:,}")
+    print(f"   Stats: ❤️ {likes:,} | 🔁 {retweets:,} | 👁️ {views:,}")
     print(f"   Images: {len(images)}")
-    if is_viral:
-        print(f"   Viral: {viral_reason}")
 
-    # ========== 第二阶段: AI 提取和验证 (支持从评论获取) ==========
-    try:
-        print(f"   [AI] Extracting prompt...")
-        extract_result = extract_prompt_with_replies(
-            text=text,
-            tweet_id=tweet_id,
-            author_username=username,
-            model=AI_MODEL
-        )
+    # 使用统一处理函数
+    result = process_tweet_for_import(
+        db=db,
+        tweet_url=tweet_url,
+        raw_text=text,
+        raw_images=images,
+        author=username,
+        import_source="x-monitor",
+        ai_model=AI_MODEL,
+        dry_run=dry_run,
+        skip_twitter_fetch=True  # 已有 Twitter 图片
+    )
 
-        # 检查提取结果
-        if not extract_result["success"]:
-            error = extract_result.get("error", "Unknown error")
-            if error == "Advertisement":
-                print(f"   [Skip] Advertisement content detected")
-                mark_tweet_processed(state, tweet_id)
-                return "advertisement"
-            elif "reply" in error.lower():
-                print(f"   [Skip] {error}")
-                print(f"   [Info] URL: {tweet_url}")
-                mark_tweet_processed(state, tweet_id)
-                return "prompt_in_reply"
-            else:
-                print(f"   [Skip] {error}")
-                mark_tweet_processed(state, tweet_id)
-                return "filtered_stage2"
+    mark_tweet_processed(state, tweet_id)
 
-        extracted_prompt = extract_result["prompt"]
-        from_reply = extract_result.get("from_reply", False)
-
-        if from_reply:
-            print(f"   [OK] Prompt extracted from author's reply")
-
-        # AI 分类
-        print(f"   [AI] Classifying...")
-        classification = classify_prompt(extracted_prompt, model=AI_MODEL)
-
-        # 准备数据
-        title = classification.get("title", "").strip()
-        if not title or title == "Untitled Prompt":
-            title = f"@{username} #{tweet_id[-6:]}"
-
-        category = map_category(classification)
-        tags = classification.get("sub_categories", [])
-        if not isinstance(tags, list):
-            tags = []
-        tags = [str(t).strip() for t in tags if t][:5]
-
-        # Dry Run 模式
-        if dry_run:
-            print(f"   [DRY RUN] Would save: {title}")
-            print(f"      Category: {category}")
-            print(f"      Tags: {tags}")
-            print(f"      Images: {len(images)}")
-            print(f"      Prompt: {extracted_prompt[:100]}...")
-            mark_tweet_processed(state, tweet_id)
-            return True
-
-        # 保存到数据库
-        print(f"   [DB] Saving: {title}")
-        prompt_record = db.save_prompt(
-            title=title,
-            prompt=extracted_prompt,
-            category=category,
-            tags=tags,
-            images=images[:5],
-            source_link=tweet_url,
-            author=username,
-            import_source=f"x-monitor"
-        )
-
-        if prompt_record:
-            print(f"   [OK] Saved: {title}")
-            mark_tweet_processed(state, tweet_id)
-            return True
-        else:
-            print(f"   [Error] Failed to save")
-            return False
-
-    except Exception as e:
-        print(f"   [Error] {e}")
-        mark_tweet_processed(state, tweet_id)
+    if result["success"]:
+        return True
+    else:
+        error = result.get("error", "")
+        if error and error != "Already exists":
+            print(f"   [Skip] {error}")
         return False
 
 

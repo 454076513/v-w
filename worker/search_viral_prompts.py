@@ -74,7 +74,7 @@ except ImportError:
     sys.exit(1)
 
 # 导入 AI 处理函数 (统一使用 prompt_utils)
-from prompt_utils import DEFAULT_MODEL, extract_prompt_with_replies, classify_prompt
+from prompt_utils import DEFAULT_MODEL, process_tweet_for_import
 
 # 导入 Twitter API 函数
 from fetch_twitter_content import (
@@ -460,7 +460,7 @@ class TwikitSearcher:
 
 async def process_tweet(db: Database, tweet: Dict, state: Dict,
                         dry_run: bool = False, hours_back: int = 0) -> bool:
-    """处理单条推文"""
+    """处理单条推文 - 使用统一处理函数"""
     tweet_id = tweet["id"]
     tweet_url = tweet["url"]
     text = tweet["text"]
@@ -477,10 +477,8 @@ async def process_tweet(db: Database, tweet: Dict, state: Dict,
             from datetime import timedelta
             from dateutil import parser as date_parser
             tweet_time = date_parser.parse(created_at)
-            # 确保时区一致
             if tweet_time.tzinfo is None:
                 tweet_time = tweet_time.replace(tzinfo=timezone.utc)
-            # 放宽时间限制到 1.5 倍
             cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours_back * 1.5)
             if tweet_time < cutoff_time:
                 print(f"   [Skip] Tweet too old: {created_at} (cutoff: {hours_back * 1.5:.0f}h)")
@@ -492,27 +490,17 @@ async def process_tweet(db: Database, tweet: Dict, state: Dict,
     if is_tweet_processed(state, tweet_id):
         return False
 
-    # 检查数据库是否已存在
-    if db.prompt_exists(tweet_url):
-        mark_tweet_processed(state, tweet_id)
-        return False
-
     # 总是尝试从 FxTwitter 获取完整内容
-    # twikit 搜索 API 对于长推文 (Twitter Notes) 可能返回截断的文本
     try:
         fx_data = fetch_with_fxtwitter(tweet_id, username)
         fx_result = parse_fxtwitter_result(fx_data)
         if fx_result:
-            # 使用 FxTwitter 返回的完整文本 (如果更长)
             fx_text = fx_result.get("text", "")
             if fx_text and len(fx_text) > len(text):
                 print(f"   [FxTwitter] Got longer text: {len(text)} -> {len(fx_text)} chars")
                 text = fx_text
-                tweet["text"] = fx_text
-            # 补充图片
             if fx_result.get("images") and not images:
                 images = fx_result["images"]
-                tweet["images"] = images
     except Exception as e:
         print(f"   [FxTwitter] Failed to get full text: {e}")
 
@@ -527,113 +515,27 @@ async def process_tweet(db: Database, tweet: Dict, state: Dict,
     print(f"   Stats: ❤️ {int(likes or 0):,} | 🔁 {int(retweets or 0):,} | 👁️ {int(views or 0):,}")
     print(f"   Images: {len(images)}")
 
-    # AI 提取提示词 (支持从评论获取)
-    try:
-        print(f"   [AI] Extracting prompt...")
-        extract_result = extract_prompt_with_replies(
-            text=text,
-            tweet_id=tweet_id,
-            author_username=username,
-            model=AI_MODEL
-        )
+    # 使用统一处理函数
+    result = process_tweet_for_import(
+        db=db,
+        tweet_url=tweet_url,
+        raw_text=text,
+        raw_images=images,
+        author=username,
+        import_source="x-search-viral",
+        ai_model=AI_MODEL,
+        dry_run=dry_run,
+        skip_twitter_fetch=True  # 已有 Twitter 图片
+    )
 
-        # 检查提取结果
-        if not extract_result["success"]:
-            error = extract_result.get("error", "Unknown error")
-            if error == "Advertisement":
-                print(f"   [Skip] Advertisement content detected")
-            elif error == "No prompt found":
-                print(f"   [Skip] AI found no prompt")
-            elif "reply" in error.lower():
-                print(f"   [Skip] {error}")
-            else:
-                print(f"   [Skip] {error}")
-            mark_tweet_processed(state, tweet_id)
-            return False
+    mark_tweet_processed(state, tweet_id)
 
-        extracted_prompt = extract_result["prompt"]
-        from_reply = extract_result.get("from_reply", False)
-
-        # 检查提示词是否太短 (可能是无效提取)
-        if len(extracted_prompt.strip()) < 20:
-            print(f"   [Skip] Prompt too short ({len(extracted_prompt)} chars)")
-            mark_tweet_processed(state, tweet_id)
-            return False
-
-        if from_reply:
-            print(f"   [OK] Prompt extracted from author's reply")
-
-        # AI 分类
-        print(f"   [AI] Classifying...")
-        classification = classify_prompt(extracted_prompt, model=AI_MODEL)
-
-        # 准备数据
-        title = classification.get("title", "").strip()
-
-        # 检查是否是无效标题 (表示解析失败)
-        invalid_titles = [
-            "Untitled Prompt",
-            "No Prompt Provided",
-            "Unknown Prompt",
-            "No Title",
-            "Untitled",
-            "N/A",
-            "",
-        ]
-        if title.lower() in [t.lower() for t in invalid_titles]:
-            # 使用默认标题
-            title = f"@{username} #{tweet_id[-6:]}"
-
-        # 再次检查分类是否有效 - 如果 category 也是 Unknown/Other 且没有 tags，可能是无效提取
-        raw_category = classification.get("category", "")
-        tags = classification.get("sub_categories", [])
-        if (raw_category.lower() in ["unknown", "other", ""] and
-            (not tags or len(tags) == 0) and
-            title.startswith("@")):  # 使用了默认标题
-            print(f"   [Skip] Classification failed (unknown category, no tags)")
-            mark_tweet_processed(state, tweet_id)
-            return False
-
-        category = map_category(classification)
-        tags = classification.get("sub_categories", [])
-        if not isinstance(tags, list):
-            tags = []
-        tags = [str(t).strip() for t in tags if t][:5]
-
-        # Dry Run
-        if dry_run:
-            print(f"   [DRY RUN] Would save: {title}")
-            print(f"      Category: {category}")
-            print(f"      Tags: {tags}")
-            print(f"      Images: {len(images)}")
-            print(f"      Prompt: {extracted_prompt[:100]}...")
-            mark_tweet_processed(state, tweet_id)
-            return True
-
-        # 保存到数据库
-        print(f"   [DB] Saving: {title}")
-        prompt_record = db.save_prompt(
-            title=title,
-            prompt=extracted_prompt,
-            category=category,
-            tags=tags,
-            images=images[:5],
-            source_link=tweet_url,
-            author=username,
-            import_source="x-search-viral"
-        )
-
-        if prompt_record:
-            print(f"   [OK] Saved: {title}")
-            mark_tweet_processed(state, tweet_id)
-            return True
-        else:
-            print(f"   [Error] Failed to save")
-            return False
-
-    except Exception as e:
-        print(f"   [Error] {e}")
-        mark_tweet_processed(state, tweet_id)
+    if result["success"]:
+        return True
+    else:
+        error = result.get("error", "")
+        if error and error != "Already exists":
+            print(f"   [Skip] {error}")
         return False
 
 
