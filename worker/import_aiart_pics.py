@@ -27,6 +27,7 @@ import sys
 import json
 import asyncio
 import argparse
+import requests
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,18 +65,14 @@ PROGRESS_FILE = CACHE_DIR / "aiart_pics_import_progress.json"
 FAILED_OUTPUT_DIR = Path(__file__).parent / "failed_imports"
 
 
-async def fetch_prompts_from_api(limit: int = 50, offset: int = 0) -> List[Dict]:
-    """通过 API 获取提示词列表（无需 Playwright）"""
-    import aiohttp
-
+def fetch_prompts_from_api(limit: int = 50, offset: int = 0) -> List[Dict]:
+    """通过 API 获取提示词列表"""
     url = f"{BASE_URL}/api/prompts?limit={limit}&offset={offset}"
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
-            if response.status != 200:
-                return []
-            data = await response.json()
-            return data.get("prompts", [])
+    response = requests.get(url, timeout=30)
+    if response.status_code != 200:
+        return []
+    return response.json().get("prompts", [])
 
 
 def extract_data_from_api_item(item: Dict) -> Optional[Dict]:
@@ -332,7 +329,7 @@ async def run_import_async(limit: int = None, max_pages: int = None, dry_run: bo
         offset = page_num * page_size
         print(f"\n📄 获取第 {page_num + 1} 页 (offset={offset})...")
         try:
-            items = await fetch_prompts_from_api(limit=page_size, offset=offset)
+            items = fetch_prompts_from_api(limit=page_size, offset=offset)
         except Exception as e:
             print(f"   ❌ API 请求失败: {e}")
             break
