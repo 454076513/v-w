@@ -74,12 +74,10 @@ except ImportError:
     sys.exit(1)
 
 # 导入 AI 处理函数 (统一使用 prompt_utils)
-from prompt_utils import DEFAULT_MODEL
+from prompt_utils import DEFAULT_MODEL, extract_prompt_with_replies, classify_prompt
 
-# 导入 Twitter API 函数和 AI 处理适配函数
+# 导入 Twitter API 函数
 from fetch_twitter_content import (
-    extract_prompt_with_ai,
-    classify_prompt_with_ai,
     fetch_with_fxtwitter,
     parse_fxtwitter_result,
 )
@@ -529,29 +527,32 @@ async def process_tweet(db: Database, tweet: Dict, state: Dict,
     print(f"   Stats: ❤️ {int(likes or 0):,} | 🔁 {int(retweets or 0):,} | 👁️ {int(views or 0):,}")
     print(f"   Images: {len(images)}")
 
-    # AI 提取提示词
+    # AI 提取提示词 (支持从评论获取)
     try:
         print(f"   [AI] Extracting prompt...")
-        extracted_prompt = extract_prompt_with_ai(text, model=AI_MODEL)
+        extract_result = extract_prompt_with_replies(
+            text=text,
+            tweet_id=tweet_id,
+            author_username=username,
+            model=AI_MODEL
+        )
 
-        # 检查是否为广告
-        if extracted_prompt == "Advertisement":
-            print(f"   [Skip] Advertisement content detected")
+        # 检查提取结果
+        if not extract_result["success"]:
+            error = extract_result.get("error", "Unknown error")
+            if error == "Advertisement":
+                print(f"   [Skip] Advertisement content detected")
+            elif error == "No prompt found":
+                print(f"   [Skip] AI found no prompt")
+            elif "reply" in error.lower():
+                print(f"   [Skip] {error}")
+            else:
+                print(f"   [Skip] {error}")
             mark_tweet_processed(state, tweet_id)
             return False
 
-        # 检查是否提取失败
-        invalid_prompts = [
-            "No prompt found",
-            "No prompt",
-            "None",
-            "N/A",
-            "",
-        ]
-        if not extracted_prompt or extracted_prompt.strip().lower() in [p.lower() for p in invalid_prompts]:
-            print(f"   [Skip] AI found no prompt")
-            mark_tweet_processed(state, tweet_id)
-            return False
+        extracted_prompt = extract_result["prompt"]
+        from_reply = extract_result.get("from_reply", False)
 
         # 检查提示词是否太短 (可能是无效提取)
         if len(extracted_prompt.strip()) < 20:
@@ -559,9 +560,12 @@ async def process_tweet(db: Database, tweet: Dict, state: Dict,
             mark_tweet_processed(state, tweet_id)
             return False
 
+        if from_reply:
+            print(f"   [OK] Prompt extracted from author's reply")
+
         # AI 分类
         print(f"   [AI] Classifying...")
-        classification = classify_prompt_with_ai(extracted_prompt, model=AI_MODEL)
+        classification = classify_prompt(extracted_prompt, model=AI_MODEL)
 
         # 准备数据
         title = classification.get("title", "").strip()

@@ -67,12 +67,10 @@ except ImportError:
     HAS_BS4 = False
 
 # 导入 AI 处理函数 (统一使用 prompt_utils)
-from prompt_utils import DEFAULT_MODEL
+from prompt_utils import DEFAULT_MODEL, extract_prompt_with_replies, classify_prompt
 
-# 导入 Twitter API 函数和 AI 处理适配函数
+# 导入 Twitter API 函数
 from fetch_twitter_content import (
-    extract_prompt_with_ai,
-    classify_prompt_with_ai,
     fetch_with_fxtwitter,
     fetch_with_vxtwitter,
     parse_fxtwitter_result,
@@ -1086,34 +1084,42 @@ async def process_tweet(db: Database, tweet: Dict, state: Dict,
     if is_viral:
         print(f"   Viral: {viral_reason}")
 
-    # ========== 第二阶段: AI 提取和验证 ==========
+    # ========== 第二阶段: AI 提取和验证 (支持从评论获取) ==========
     try:
         print(f"   [AI] Extracting prompt...")
-        extracted_prompt = extract_prompt_with_ai(text, model=AI_MODEL)
+        extract_result = extract_prompt_with_replies(
+            text=text,
+            tweet_id=tweet_id,
+            author_username=username,
+            model=AI_MODEL
+        )
 
-        # 检查是否为广告
-        if extracted_prompt == "Advertisement":
-            print(f"   [Skip] Advertisement content detected")
-            mark_tweet_processed(state, tweet_id)
-            return "advertisement"
+        # 检查提取结果
+        if not extract_result["success"]:
+            error = extract_result.get("error", "Unknown error")
+            if error == "Advertisement":
+                print(f"   [Skip] Advertisement content detected")
+                mark_tweet_processed(state, tweet_id)
+                return "advertisement"
+            elif "reply" in error.lower():
+                print(f"   [Skip] {error}")
+                print(f"   [Info] URL: {tweet_url}")
+                mark_tweet_processed(state, tweet_id)
+                return "prompt_in_reply"
+            else:
+                print(f"   [Skip] {error}")
+                mark_tweet_processed(state, tweet_id)
+                return "filtered_stage2"
 
-        # 处理 "Prompt 在评论中" 的情况
-        if extracted_prompt == "Prompt in reply":
-            print(f"   [Skip] Prompt is in comment/reply (not in main post)")
-            print(f"   [Info] URL: {tweet_url}")
-            mark_tweet_processed(state, tweet_id)
-            # 返回特殊值表示 prompt 在评论中
-            return "prompt_in_reply"
+        extracted_prompt = extract_result["prompt"]
+        from_reply = extract_result.get("from_reply", False)
 
-        if not extracted_prompt or extracted_prompt == "No prompt found":
-            print(f"   [Skip] AI found no prompt")
-            mark_tweet_processed(state, tweet_id)
-            # 返回特殊值表示被第二阶段 AI 过滤
-            return "filtered_stage2"
+        if from_reply:
+            print(f"   [OK] Prompt extracted from author's reply")
 
         # AI 分类
         print(f"   [AI] Classifying...")
-        classification = classify_prompt_with_ai(extracted_prompt, model=AI_MODEL)
+        classification = classify_prompt(extracted_prompt, model=AI_MODEL)
 
         # 准备数据
         title = classification.get("title", "").strip()

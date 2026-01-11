@@ -796,3 +796,225 @@ def process_text(text: str, model: str = DEFAULT_MODEL, classify: bool = True) -
         result["classification"] = None
 
     return result
+
+
+# ========== 从评论获取提示词 ==========
+
+def fetch_author_replies(tweet_id: str, author_username: str) -> list:
+    """
+    获取作者对自己帖子的回复（通过子进程调用避免连接池问题）
+
+    Args:
+        tweet_id: 推文 ID
+        author_username: 原始作者用户名
+
+    Returns:
+        作者回复列表，每个元素包含 {"text": "...", "is_author": True}
+    """
+    import subprocess
+    import json
+    import sys
+
+    # 检查 cookies 是否存在
+    cookies_file = Path(__file__).parent / "x_cookies.json"
+    x_cookie_env = os.environ.get("X_COOKIE", "")
+
+    cookies = {}
+    if x_cookie_env:
+        try:
+            cookies = json.loads(x_cookie_env)
+        except:
+            pass
+    elif cookies_file.exists():
+        try:
+            with open(cookies_file) as f:
+                cookies = json.load(f)
+        except:
+            pass
+
+    if not cookies:
+        print("      ⚠️ 未配置 Twitter cookies，无法获取评论")
+        return []
+
+    auth_token = cookies.get("auth_token", "")
+    ct0 = cookies.get("ct0", "")
+
+    if not auth_token or not ct0:
+        print("      ⚠️ Twitter cookies 缺少 auth_token 或 ct0")
+        return []
+
+    # 使用子进程调用独立脚本，避免连接池问题
+    script_path = Path(__file__).parent / "fetch_replies.py"
+
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script_path), tweet_id, author_username],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+
+        if result.returncode == 0 and result.stdout.strip():
+            replies = json.loads(result.stdout.strip())
+            return replies
+        else:
+            if result.stderr:
+                # 只显示非 DEBUG 的错误
+                error_lines = [l for l in result.stderr.split('\n') if not l.startswith('DEBUG:')]
+                if error_lines:
+                    print(f"      ⚠️ 子进程错误: {' '.join(error_lines)[:200]}")
+            return []
+
+    except subprocess.TimeoutExpired:
+        print("      ⚠️ 获取评论超时")
+        return []
+    except json.JSONDecodeError as e:
+        print(f"      ⚠️ 解析回复失败: {e}")
+        return []
+    except Exception as e:
+        print(f"      ⚠️ 获取评论失败: {e}")
+        return []
+
+
+def extract_prompt_from_replies(replies: list, model: str = DEFAULT_MODEL) -> str:
+    """
+    从作者回复列表中提取 prompt
+
+    Args:
+        replies: 回复列表 [{"text": "...", ...}, ...]
+        model: AI 模型
+
+    Returns:
+        提取的 prompt 或 None
+    """
+    if not replies:
+        return None
+
+    # 首先尝试正则表达式提取（更快更可靠）
+    for reply in replies:
+        reply_text = reply.get("text", "")
+        prompt = extract_prompt_regex(reply_text)
+        if prompt:
+            return prompt
+
+    # 如果正则没有提取到，尝试 AI 提取
+    # 合并所有回复文本
+    combined_text = "\n\n".join([r.get("text", "") for r in replies])
+
+    try:
+        messages = [
+            {
+                "role": "system",
+                "content": "You are a helpful assistant that extracts AI image generation prompts from text. Extract only the prompt itself, without any additional explanation or formatting. If no prompt is found, return 'No prompt found'."
+            },
+            {
+                "role": "user",
+                "content": f"Extract the AI image generation prompt from this text and return only the prompt itself:\n\n{combined_text}"
+            }
+        ]
+
+        result = call_ai(messages, model)
+        if result and result != "No prompt found":
+            return result
+
+    except Exception as e:
+        print(f"      ⚠️ AI 从回复提取失败: {e}")
+
+    return None
+
+
+def extract_prompt_with_replies(
+    text: str,
+    tweet_id: str,
+    author_username: str,
+    model: str = DEFAULT_MODEL
+) -> dict:
+    """
+    从文本中提取提示词，如果提示词在评论中则尝试从评论获取
+
+    这是一个通用函数，供所有爬取脚本使用。
+
+    Args:
+        text: 推文正文
+        tweet_id: 推文 ID
+        author_username: 作者用户名
+        model: AI 模型
+
+    Returns:
+        dict: {
+            "success": bool,           # 是否成功提取
+            "prompt": str or None,     # 提取的 prompt
+            "location": "post" | "reply" | None,  # prompt 位置
+            "method": "regex" | "ai" | None,      # 提取方法
+            "from_reply": bool,        # 是否从评论获取
+            "error": str or None       # 错误信息（失败时）
+        }
+    """
+    result = {
+        "success": False,
+        "prompt": None,
+        "location": None,
+        "method": None,
+        "from_reply": False,
+        "error": None
+    }
+
+    if not text:
+        result["error"] = "Empty text"
+        return result
+
+    # 第一步：尝试从正文提取
+    extract_result = extract_prompt(text, model=model, use_ai=True)
+    prompt = extract_result.get("prompt")
+    location = extract_result.get("location")
+    method = extract_result.get("method")
+
+    # 处理广告
+    if prompt == "Advertisement":
+        result["error"] = "Advertisement"
+        result["method"] = method
+        return result
+
+    # 处理 "Prompt in reply" - 尝试从评论获取
+    if prompt == "Prompt in reply" or location == "reply":
+        print(f"      ⚠️ Prompt 在评论中，尝试获取作者回复...")
+
+        # 获取作者回复
+        replies = fetch_author_replies(tweet_id, author_username)
+
+        if replies:
+            print(f"      ✓ 获取到 {len(replies)} 条作者回复")
+
+            # 从回复中提取 prompt
+            reply_prompt = extract_prompt_from_replies(replies, model)
+
+            if reply_prompt:
+                result["success"] = True
+                result["prompt"] = reply_prompt
+                result["location"] = "reply"
+                result["method"] = "ai"
+                result["from_reply"] = True
+                print(f"      ✓ 从评论中提取成功: {reply_prompt[:80]}...")
+                return result
+            else:
+                result["error"] = "Failed to extract prompt from replies"
+                print(f"      ⚠️ 从评论中未能提取到 prompt")
+        else:
+            result["error"] = "No author replies found"
+            print(f"      ⚠️ 未获取到作者回复")
+
+        return result
+
+    # 处理未找到 prompt
+    if not prompt or prompt == "No prompt found":
+        result["error"] = "No prompt found"
+        result["method"] = method
+        return result
+
+    # 成功从正文提取
+    result["success"] = True
+    result["prompt"] = prompt
+    result["location"] = location or "post"
+    result["method"] = method
+    result["from_reply"] = False
+    return result
