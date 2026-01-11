@@ -466,13 +466,25 @@ IMPORTANT RULES:
    - App/software promotions without actual prompts
    - Giveaways that require following/retweeting
    - Self-promotion of services or products
-   If it's an advertisement, return 'Advertisement'.
+   - Lists of AI tools or software recommendations (e.g., "Top 10 AI tools", "100+ AI Tools")
+   - Engagement bait: "Like", "Comment", "RT", "Retweet", "Follow me", "Must follow", "Bookmark this"
+   - Numbered lists of tool names or categories (e.g., "1. Research - ChatGPT, YouChat...")
+   If it's an advertisement or tool list, return 'Advertisement'.
 
 2. Extract only the actual prompt itself, without any additional explanation or formatting.
 3. If the text contains indicators like "Prompt👇", "prompt below", "check comment", "prompt in reply" etc., it means the actual prompt is in a reply/comment, not in the main post. In this case, return 'Prompt in reply'.
 4. If the text only contains a title or description of what the image shows (like "Nano Banana prompt" or "Any person to Trash Pop Collage") but NOT the actual detailed prompt, return 'No prompt found'.
-5. A real prompt usually contains detailed descriptions, style parameters (like --ar, --v), or specific technical terms.
-6. If no actual prompt is found, return 'No prompt found'."""
+5. A real AI image generation prompt usually contains:
+   - Detailed scene descriptions (subjects, actions, environments)
+   - Visual style specifications (lighting, colors, mood)
+   - Technical parameters (--ar, --v, --style, resolution)
+   - Art style references (photorealistic, anime, oil painting, etc.)
+6. The following are NOT prompts - return 'No prompt found':
+   - Lists of AI tools or software names
+   - News or commentary about AI
+   - Tutorials without actual prompts
+   - General discussions about image generation
+7. If no actual prompt is found, return 'No prompt found'."""
         },
         {
             "role": "user",
