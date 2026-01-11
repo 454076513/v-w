@@ -51,7 +51,7 @@ except ImportError:
 
 # 导入主模块
 from main import Database, AI_MODEL
-from fetch_twitter_content import classify_prompt_with_ai
+from fetch_twitter_content import fetch_tweet, classify_prompt_with_ai, extract_username
 
 # ========== 配置 ==========
 BASE_URL = "https://aiart.pics"
@@ -169,100 +169,146 @@ def process_api_item(db: Database, api_data: Dict, dry_run: bool = False) -> Dic
     """
     处理 API 返回的单个条目
 
-    流程:
-    1. 从 API 数据提取信息
-    2. 使用 AI 分类（可选）
-    3. 写入数据库
+    策略（与 import_opennana.py 一致）:
+    - 提示词: 直接使用 API 的原始数据
+    - 标题/分类/标签: 用 AI 解析
+    - 图片: 优先从 Twitter 获取高清图，失败则用 API 的图片
+
+    返回: {"success": bool, "method": str, "error": str or None, "twitter_failed": bool}
     """
     x_url = api_data.get("x_url", "")
     prompt = api_data.get("prompt", "")
-    images = api_data.get("images", [])
+    fallback_images = api_data.get("images", [])
     api_title = api_data.get("title", "")
     api_author = api_data.get("author", "")
     api_tags = api_data.get("tags", [])
 
     if not x_url:
-        return {"success": False, "method": "skipped", "error": "No x_url"}
+        return {"success": False, "method": "skipped", "error": "No x_url", "twitter_failed": False}
 
     if not prompt:
-        return {"success": False, "method": "skipped", "error": "No prompt"}
-
-    if not images:
-        return {"success": False, "method": "skipped", "error": "No images"}
+        return {"success": False, "method": "skipped", "error": "No prompt", "twitter_failed": False}
 
     # 检查是否已存在
     if db.prompt_exists(x_url):
-        return {"success": False, "method": "skipped", "error": "Already exists"}
+        return {"success": False, "method": "skipped", "error": "Already exists", "twitter_failed": False}
 
-    print(f"   ✅ API 数据: {len(images)} 张图片")
-
-    # AI 分类 - 使用 API 提供的标签，或进行 AI 分类
+    # 用于最终入库的数据
     final_title = api_title
-    category = None
-    tags = api_tags[:5] if api_tags else []
+    final_category = "Illustration"
+    final_tags = api_tags[:5] if api_tags else []
+    final_images = []
+    twitter_failed = False
+    twitter_error = None
 
-    # 如果没有标签，尝试 AI 分类
-    if not tags:
-        print(f"   🤖 AI 分类...")
-        try:
-            classification = classify_prompt_with_ai(prompt, AI_MODEL)
-            if classification:
-                if not final_title:
-                    ai_title = classification.get("title", "").strip()
-                    if ai_title and ai_title != "Untitled Prompt":
-                        final_title = ai_title
+    # 从 Twitter 获取高清图片（必须成功才入库）
+    print(f"   🐦 从 Twitter 获取图片...")
+    try:
+        result = fetch_tweet(
+            x_url,
+            download_images=False,
+            extract_prompt=False,  # 不需要提取提示词，使用 API 的
+            ai_model=AI_MODEL
+        )
 
-                ai_category = classification.get("category", "").strip()
-                if ai_category:
-                    category = ai_category
+        twitter_images = result.get("images", []) if result else []
 
-                if classification.get("sub_categories"):
-                    tags = classification["sub_categories"][:5]
+        if twitter_images and len(twitter_images) > 0:
+            # 检测是否为广告
+            if result.get("is_advertisement"):
+                print(f"   🚫 检测到广告内容，跳过")
+                return {"success": False, "method": "skipped", "error": "Advertisement content detected", "twitter_failed": False}
 
-                print(f"   ✅ AI 分类: {category}")
-        except Exception as e:
-            print(f"   ⚠️ AI 分类失败: {e}")
+            # 使用 Twitter 的高清图片
+            final_images = twitter_images[:5]
+            print(f"   ✅ 获取到 {len(final_images)} 张 Twitter 图片")
+        else:
+            twitter_failed = True
+            twitter_error = "Twitter 抓取成功但无图片" if result else "Twitter 抓取失败"
+
+    except Exception as e:
+        twitter_failed = True
+        twitter_error = str(e)
+
+    # Twitter 失败直接跳过，不使用备用图片
+    if twitter_failed:
+        print(f"   ❌ Twitter 失败: {twitter_error}")
+        return {
+            "success": False,
+            "method": "twitter_failed",
+            "error": twitter_error,
+            "twitter_failed": True,
+            "twitter_error": twitter_error
+        }
+
+    # 使用 AI 解析标题、分类、标签
+    print(f"   🤖 AI 解析分类...")
+    try:
+        classification = classify_prompt_with_ai(prompt, AI_MODEL)
+        if classification:
+            ai_title = classification.get("title", "").strip()
+            if ai_title and ai_title != "Untitled Prompt":
+                final_title = ai_title
+
+            ai_category = classification.get("category", "").strip()
+            if ai_category:
+                final_category = ai_category
+
+            ai_tags = classification.get("sub_categories", [])
+            if ai_tags and isinstance(ai_tags, list):
+                combined_tags = list(dict.fromkeys(ai_tags + final_tags))
+                final_tags = combined_tags[:5]
+
+            print(f"   ✅ AI 解析成功: {final_category}")
+    except Exception as e:
+        print(f"   ⚠️ AI 解析失败: {e}，使用原始数据")
 
     # Fallback
     if not final_title:
         final_title = "Untitled"
-    if not category:
-        category = "Illustration"
 
     if dry_run:
         print(f"   🔍 [Dry Run] 将入库:")
         print(f"      标题: {final_title}")
-        print(f"      分类: {category}")
-        print(f"      图片: {len(images)}")
+        print(f"      分类: {final_category}")
+        print(f"      图片: {len(final_images)}")
         print(f"      提示词: {prompt[:80]}...")
-        return {"success": True, "method": "dry_run", "error": None}
+        return {"success": True, "method": "dry_run", "error": None, "twitter_failed": False}
+
+    # 提取作者
+    author = api_author
+    if not author:
+        try:
+            author = extract_username(x_url)
+        except:
+            pass
 
     # 写入数据库
     try:
         record = db.save_prompt(
             title=final_title,
             prompt=prompt,
-            category=category,
-            tags=tags,
-            images=images[:5],
+            category=final_category,
+            tags=final_tags,
+            images=final_images,
             source_link=x_url,
-            author=api_author,
+            author=author,
             import_source="aiart_pics"
         )
 
         if record:
-            return {"success": True, "method": "imported", "error": None}
+            return {"success": True, "method": "imported", "error": None, "twitter_failed": False}
         else:
-            return {"success": False, "method": "save_failed", "error": "Database save returned None"}
+            return {"success": False, "method": "save_failed", "error": "Database save returned None", "twitter_failed": False}
     except Exception as e:
-        return {"success": False, "method": "save_failed", "error": str(e)}
+        return {"success": False, "method": "save_failed", "error": str(e), "twitter_failed": False}
 
 
 async def run_import_async(limit: int = None, max_pages: int = None, dry_run: bool = False,
                            resume: bool = True, reset_progress: bool = False):
     """异步导入流程 - 通过 API 获取数据"""
     print("=" * 70)
-    print("📦 AIART.PICS 导入 (API)")
+    print("📦 AIART.PICS 导入 (API + Twitter)")
     print("=" * 70)
     print(f"数据源: {BASE_URL}/api/prompts")
     print(f"预览模式: {dry_run}")
@@ -305,6 +351,7 @@ async def run_import_async(limit: int = None, max_pages: int = None, dry_run: bo
         "success": 0,
         "skipped": 0,
         "failed": 0,
+        "twitter_failed": 0,
     }
 
     failed_items = []
@@ -362,16 +409,31 @@ async def run_import_async(limit: int = None, max_pages: int = None, dry_run: bo
             processed_count += 1
             title_display = api_data.get("title", "")[:40] or item_id[:20]
             print(f"\n[{processed_count}] {title_display}")
+            print(f"   🔗 X: {api_data.get('x_url', '')[:60]}")
 
             result = process_api_item(db, api_data, dry_run=dry_run)
 
+            # 记录 Twitter 处理失败
+            if result.get("twitter_failed"):
+                stats["twitter_failed"] += 1
+                failed_items.append({
+                    "id": item_id,
+                    "x_url": api_data.get("x_url", ""),
+                    "error": result.get("error", "Unknown")
+                })
+
             if result["success"]:
                 stats["success"] += 1
-                print(f"   ✅ 成功入库")
+                if result["method"] == "dry_run":
+                    print(f"   ✅ 预览通过")
+                else:
+                    print(f"   ✅ 成功入库")
             else:
                 if result["method"] == "skipped":
                     stats["skipped"] += 1
                     print(f"   ⏭️ 跳过: {result['error']}")
+                elif result["method"] == "twitter_failed":
+                    pass  # 已在上面记录
                 else:
                     stats["failed"] += 1
                     print(f"   ❌ 失败: {result['error']}")
@@ -406,6 +468,7 @@ async def run_import_async(limit: int = None, max_pages: int = None, dry_run: bo
     print(f"✅ 成功: {stats['success']}")
     print(f"⏭️ 跳过: {stats['skipped']}")
     print(f"❌ 失败: {stats['failed']}")
+    print(f"⚠️ Twitter 失败: {stats['twitter_failed']}")
 
     if failed_file:
         print(f"\n📁 失败记录已保存: {failed_file}")
@@ -418,13 +481,18 @@ async def run_import_async(limit: int = None, max_pages: int = None, dry_run: bo
 def run_import(limit: int = None, max_pages: int = None, dry_run: bool = False,
                resume: bool = True, reset_progress: bool = False):
     """同步入口"""
-    asyncio.run(run_import_async(
-        limit=limit,
-        max_pages=max_pages,
-        dry_run=dry_run,
-        resume=resume,
-        reset_progress=reset_progress
-    ))
+    # 使用 asyncio.run 运行异步函数
+    try:
+        asyncio.run(run_import_async(
+            limit=limit,
+            max_pages=max_pages,
+            dry_run=dry_run,
+            resume=resume,
+            reset_progress=reset_progress
+        ))
+    except KeyboardInterrupt:
+        print("\n\n⚠️ 用户中断，进度已保存")
+        sys.exit(0)
 
 
 def main():
