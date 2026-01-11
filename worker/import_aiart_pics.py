@@ -2,23 +2,23 @@
 """
 AIART.PICS 提示词导入脚本
 
-直接从 aiart.pics 网站爬取数据并导入到数据库。
+通过 aiart.pics API 获取数据并导入到数据库。
 
 工作流程:
-1. 用 Playwright 爬取 aiart.pics 列表页获取所有 slug
-2. 访问详情页获取提示词和 x_url
-3. 从 Twitter 获取高清图片
-4. 使用 AI 分析分类后入库
+1. 通过 API (/api/prompts) 获取提示词列表
+2. 使用 API 返回的数据（包含提示词、图片、作者、标签）
+3. 如需要则进行 AI 分类
+4. 写入数据库
 
 环境变量:
   DATABASE_URL - PostgreSQL 连接字符串 (必需)
   AI_MODEL     - AI 模型 (默认: openai)
 
 用法:
-  python import_aiart_pics.py                    # 爬取并导入
+  python import_aiart_pics.py                    # 导入数据
   python import_aiart_pics.py --limit 10         # 限制导入数量
   python import_aiart_pics.py --dry-run          # 预览模式
-  python import_aiart_pics.py --pages 5          # 只爬取前 5 页
+  python import_aiart_pics.py --pages 5          # 只获取前 5 页
   python import_aiart_pics.py --reset            # 重置进度
 """
 
@@ -50,7 +50,7 @@ except ImportError:
 
 # 导入主模块
 from main import Database, AI_MODEL
-from fetch_twitter_content import fetch_tweet, classify_prompt_with_ai, extract_username
+from fetch_twitter_content import classify_prompt_with_ai
 
 # ========== 配置 ==========
 BASE_URL = "https://aiart.pics"
@@ -64,97 +64,58 @@ PROGRESS_FILE = CACHE_DIR / "aiart_pics_import_progress.json"
 FAILED_OUTPUT_DIR = Path(__file__).parent / "failed_imports"
 
 
-async def fetch_list_page(page, page_num: int) -> List[Dict]:
-    """爬取列表页获取 slug 列表"""
-    url = f"{BASE_URL}/?page={page_num}"
+async def fetch_prompts_from_api(limit: int = 50, offset: int = 0) -> List[Dict]:
+    """通过 API 获取提示词列表（无需 Playwright）"""
+    import aiohttp
 
-    await page.goto(url, wait_until="networkidle", timeout=30000)
-    await page.wait_for_timeout(3000)
+    url = f"{BASE_URL}/api/prompts?limit={limit}&offset={offset}"
 
-    # 从图片 URL 提取 slug (网站已改为 onclick 而非 <a> 链接)
-    items = await page.evaluate("""
-        () => {
-            const items = [];
-            // 查找所有 prompt 图片
-            document.querySelectorAll('img[src*="/prompts/"]').forEach(img => {
-                const src = img.src;
-                // URL 格式: https://img1.aiart.pics/images/prompts/20260104/slug-name-1.jpg
-                const match = src.match(/\\/prompts\\/\\d+\\/(.+?)-\\d+\\.(?:jpg|png|webp)/);
-                if (match) {
-                    const slug = match[1];
-                    // 向上查找卡片容器获取标题
-                    let el = img;
-                    let title = '';
-                    for (let i = 0; i < 6 && el; i++) {
-                        const h = el.querySelector('h2, h3, p.font-medium, [class*="title"]');
-                        if (h) {
-                            title = h.innerText?.trim() || '';
-                            break;
-                        }
-                        el = el.parentElement;
-                    }
-                    items.push({ slug, title });
-                }
-            });
-            // 去重
-            const seen = new Set();
-            return items.filter(item => {
-                if (seen.has(item.slug)) return false;
-                seen.add(item.slug);
-                return true;
-            });
-        }
-    """)
-
-    return items
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
+            if response.status != 200:
+                return []
+            data = await response.json()
+            return data.get("prompts", [])
 
 
-async def fetch_detail_page(page, slug: str) -> Optional[Dict]:
-    """爬取详情页获取提示词和 x_url"""
-    url = f"{BASE_URL}/?prompt={slug}"
+def extract_data_from_api_item(item: Dict) -> Optional[Dict]:
+    """从 API 返回的 item 中提取需要的数据"""
+    origin_url = item.get("originUrl", "")
+    if not origin_url:
+        return None
 
-    await page.goto(url, wait_until="networkidle", timeout=30000)
+    # 合并 prompts 数组为单个字符串
+    prompts = item.get("prompts", [])
+    prompt_text = "\n".join(prompts) if prompts else ""
 
-    # 等待内容加载
-    try:
-        await page.wait_for_selector('a[href*="/status/"]', timeout=5000)
-    except Exception:
-        await page.wait_for_timeout(3000)
+    # 提取标题 (优先英文)
+    title_obj = item.get("title", {})
+    title = title_obj.get("en") or title_obj.get("zh") or ""
 
-    # 提取数据
-    data = await page.evaluate("""
-        () => {
-            const result = { prompt: null, x_url: null, title: null };
+    # 提取图片 URL
+    images = []
+    img_base = "https://img1.aiart.pics/"
+    for img in item.get("images", []):
+        path = img.get("path", "")
+        if path:
+            images.append(f"{img_base}{path}")
 
-            // 提取 x_url
-            const xLink = document.querySelector('a[href*="x.com/"][href*="/status/"], a[href*="twitter.com/"][href*="/status/"]');
-            if (xLink) {
-                result.x_url = xLink.getAttribute('href').replace('twitter.com', 'x.com');
-            }
+    # 提取作者
+    author_obj = item.get("author", {})
+    author = author_obj.get("username") or author_obj.get("name") or ""
 
-            // 提取提示词 (优先 textarea，其次 .prose / pre)
-            const textarea = document.querySelector('textarea');
-            if (textarea && textarea.value) {
-                result.prompt = textarea.value.trim();
-            } else {
-                const prose = document.querySelector('.prose');
-                if (prose) {
-                    result.prompt = prose.innerText.trim();
-                } else {
-                    const pre = document.querySelector('pre');
-                    if (pre) result.prompt = pre.innerText.trim();
-                }
-            }
+    # 提取标签
+    tags = item.get("tags", [])
 
-            // 提取标题
-            const h1 = document.querySelector('h1');
-            if (h1) result.title = h1.innerText.trim();
-
-            return result;
-        }
-    """)
-
-    return data if data.get('x_url') or data.get('prompt') else None
+    return {
+        "x_url": origin_url.replace("twitter.com", "x.com"),
+        "prompt": prompt_text,
+        "title": title,
+        "images": images,
+        "author": author,
+        "tags": tags,
+        "id": item.get("id", ""),
+    }
 
 
 def load_progress() -> Dict:
@@ -207,91 +168,65 @@ def save_failed_items(failed_items: List[Dict], timestamp: str) -> Optional[Path
     return filepath
 
 
-async def process_item(db: Database, page, slug: str, title: str, dry_run: bool = False) -> Dict[str, Any]:
+def process_api_item(db: Database, api_data: Dict, dry_run: bool = False) -> Dict[str, Any]:
     """
-    处理单个条目
+    处理 API 返回的单个条目
 
     流程:
-    1. 从详情页获取提示词和 x_url
-    2. 从 Twitter 获取图片
-    3. 使用 AI 分类
-    4. 写入数据库
+    1. 从 API 数据提取信息
+    2. 使用 AI 分类（可选）
+    3. 写入数据库
     """
-    # 1. 获取详情页数据
-    print(f"   🌐 获取详情页...")
-    try:
-        detail = await fetch_detail_page(page, slug)
-    except Exception as e:
-        return {"success": False, "method": "page_failed", "error": f"Page error: {e}"}
-
-    if not detail:
-        return {"success": False, "method": "skipped", "error": "No data on page"}
-
-    x_url = detail.get("x_url", "")
+    x_url = api_data.get("x_url", "")
+    prompt = api_data.get("prompt", "")
+    images = api_data.get("images", [])
+    api_title = api_data.get("title", "")
+    api_author = api_data.get("author", "")
+    api_tags = api_data.get("tags", [])
 
     if not x_url:
         return {"success": False, "method": "skipped", "error": "No x_url"}
+
+    if not prompt:
+        return {"success": False, "method": "skipped", "error": "No prompt"}
+
+    if not images:
+        return {"success": False, "method": "skipped", "error": "No images"}
 
     # 检查是否已存在
     if db.prompt_exists(x_url):
         return {"success": False, "method": "skipped", "error": "Already exists"}
 
-    # 2. 从 Twitter 获取图片和文本（不使用原网页的 prompt/title）
-    print(f"   🐦 从 Twitter 获取数据...")
-    try:
-        result = fetch_tweet(
-            x_url,
-            download_images=False,
-            extract_prompt=False,
-            ai_model=AI_MODEL
-        )
-    except Exception as e:
-        return {"success": False, "method": "twitter_failed", "error": str(e), "twitter_failed": True}
+    print(f"   ✅ API 数据: {len(images)} 张图片")
 
-    if not result:
-        return {"success": False, "method": "twitter_failed", "error": "fetch_tweet returned None", "twitter_failed": True}
-
-    images = result.get("images", [])
-    if not images:
-        return {"success": False, "method": "twitter_failed", "error": "No images", "twitter_failed": True}
-
-    # 从 Twitter 获取 prompt（full_text）
-    prompt = result.get("full_text", "").strip()
-    if not prompt:
-        return {"success": False, "method": "twitter_failed", "error": "No prompt from Twitter", "twitter_failed": True}
-
-    # 检测是否为广告 (由 fetch_tweet 统一处理)
-    if result.get("is_advertisement"):
-        print(f"   🚫 检测到广告内容，跳过")
-        return {"success": False, "method": "skipped", "error": "Advertisement content detected"}
-
-    print(f"   ✅ 获取到 {len(images)} 张图片")
-
-    # 3. AI 分类 - 优先使用 AI 结果
-    print(f"   🤖 AI 分类...")
-    final_title = None
+    # AI 分类 - 使用 API 提供的标签，或进行 AI 分类
+    final_title = api_title
     category = None
-    tags = []
+    tags = api_tags[:5] if api_tags else []
 
-    try:
-        classification = classify_prompt_with_ai(prompt, AI_MODEL)
-        if classification:
-            ai_title = classification.get("title", "").strip()
-            if ai_title and ai_title != "Untitled Prompt":
-                final_title = ai_title
+    # 如果没有标签，尝试 AI 分类
+    if not tags:
+        print(f"   🤖 AI 分类...")
+        try:
+            classification = classify_prompt_with_ai(prompt, AI_MODEL)
+            if classification:
+                if not final_title:
+                    ai_title = classification.get("title", "").strip()
+                    if ai_title and ai_title != "Untitled Prompt":
+                        final_title = ai_title
 
-            ai_category = classification.get("category", "").strip()
-            if ai_category:
-                category = ai_category
+                ai_category = classification.get("category", "").strip()
+                if ai_category:
+                    category = ai_category
 
-            if classification.get("sub_categories"):
-                tags = classification["sub_categories"][:5]
+                if classification.get("sub_categories"):
+                    tags = classification["sub_categories"][:5]
 
-            print(f"   ✅ AI 分类: {category}")
-    except Exception as e:
-        print(f"   ⚠️ AI 分类失败: {e}")
+                print(f"   ✅ AI 分类: {category}")
+        except Exception as e:
+            print(f"   ⚠️ AI 分类失败: {e}")
 
-    # Fallback: AI 失败时使用默认值（不使用原网页数据）
+    # Fallback
     if not final_title:
         final_title = "Untitled"
     if not category:
@@ -305,12 +240,7 @@ async def process_item(db: Database, page, slug: str, title: str, dry_run: bool 
         print(f"      提示词: {prompt[:80]}...")
         return {"success": True, "method": "dry_run", "error": None}
 
-    # 4. 提取作者并写入数据库
-    try:
-        author = extract_username(x_url)
-    except:
-        author = None
-
+    # 写入数据库
     try:
         record = db.save_prompt(
             title=final_title,
@@ -319,7 +249,7 @@ async def process_item(db: Database, page, slug: str, title: str, dry_run: bool 
             tags=tags,
             images=images[:5],
             source_link=x_url,
-            author=author,
+            author=api_author,
             import_source="aiart_pics"
         )
 
@@ -333,13 +263,11 @@ async def process_item(db: Database, page, slug: str, title: str, dry_run: bool 
 
 async def run_import_async(limit: int = None, max_pages: int = None, dry_run: bool = False,
                            resume: bool = True, reset_progress: bool = False):
-    """异步导入流程 - 直接从网页爬取"""
-    from playwright.async_api import async_playwright
-
+    """异步导入流程 - 通过 API 获取数据"""
     print("=" * 70)
-    print("📦 AIART.PICS 导入 (网页爬取)")
+    print("📦 AIART.PICS 导入 (API)")
     print("=" * 70)
-    print(f"数据源: {BASE_URL}")
+    print(f"数据源: {BASE_URL}/api/prompts")
     print(f"预览模式: {dry_run}")
     print(f"断点续传: {resume}")
     if limit:
@@ -359,9 +287,9 @@ async def run_import_async(limit: int = None, max_pages: int = None, dry_run: bo
 
     # 加载进度
     progress = load_progress()
-    processed_slugs = set(progress.get("processed_slugs", []))
-    if resume and processed_slugs:
-        print(f"📊 已处理: {len(processed_slugs)} 条")
+    processed_ids = set(progress.get("processed_slugs", []))  # 现在存储 ID 而非 slug
+    if resume and processed_ids:
+        print(f"📊 已处理: {len(processed_ids)} 条")
         print(f"   上次更新: {progress.get('last_updated', 'N/A')}")
 
     # 连接数据库
@@ -380,107 +308,92 @@ async def run_import_async(limit: int = None, max_pages: int = None, dry_run: bo
         "success": 0,
         "skipped": 0,
         "failed": 0,
-        "twitter_failed": 0,
     }
 
     failed_items = []
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     processed_count = 0
 
-    async with async_playwright() as p:
-        # 启动浏览器
+    page_num = 0
+    page_size = 50
+
+    while True:
+        # 检查是否达到页数限制
+        if max_pages and page_num >= max_pages:
+            print(f"\n📄 已达到最大页数 {max_pages}")
+            break
+
+        # 检查是否达到数量限制
+        if limit and processed_count >= limit:
+            print(f"\n📊 已达到数量限制 {limit}")
+            break
+
+        # 通过 API 获取数据
+        offset = page_num * page_size
+        print(f"\n📄 获取第 {page_num + 1} 页 (offset={offset})...")
         try:
-            browser = await p.chromium.launch(headless=True, channel="chrome")
-        except Exception:
-            try:
-                browser = await p.firefox.launch(headless=True)
-            except Exception:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    executable_path="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-                )
+            items = await fetch_prompts_from_api(limit=page_size, offset=offset)
+        except Exception as e:
+            print(f"   ❌ API 请求失败: {e}")
+            break
 
-        try:
-            page = await browser.new_page()
-            page_num = 1
+        if not items:
+            print(f"   📭 没有更多数据")
+            break
 
-            while True:
-                # 检查是否达到页数限制
-                if max_pages and page_num > max_pages:
-                    print(f"\n📄 已达到最大页数 {max_pages}")
-                    break
+        stats["pages"] += 1
+        stats["items_found"] += len(items)
+        print(f"   找到 {len(items)} 条记录")
 
-                # 检查是否达到数量限制
-                if limit and processed_count >= limit:
-                    print(f"\n📊 已达到数量限制 {limit}")
-                    break
+        # 处理每个条目
+        for item in items:
+            item_id = item.get("id", "")
 
-                # 爬取列表页
-                print(f"\n📄 爬取第 {page_num} 页...")
-                try:
-                    items = await fetch_list_page(page, page_num)
-                except Exception as e:
-                    print(f"   ❌ 列表页爬取失败: {e}")
-                    break
+            # 检查是否已处理
+            if resume and item_id in processed_ids:
+                continue
 
-                if not items:
-                    print(f"   📭 没有更多数据")
-                    break
+            # 检查数量限制
+            if limit and processed_count >= limit:
+                break
 
-                stats["pages"] += 1
-                stats["items_found"] += len(items)
-                print(f"   找到 {len(items)} 条记录")
+            # 提取数据
+            api_data = extract_data_from_api_item(item)
+            if not api_data:
+                continue
 
-                # 处理每个条目
-                for item in items:
-                    slug = item.get("slug", "")
-                    title = item.get("title", "")
+            processed_count += 1
+            title_display = api_data.get("title", "")[:40] or item_id[:20]
+            print(f"\n[{processed_count}] {title_display}")
 
-                    # 检查是否已处理
-                    if resume and slug in processed_slugs:
-                        continue
+            result = process_api_item(db, api_data, dry_run=dry_run)
 
-                    # 检查数量限制
-                    if limit and processed_count >= limit:
-                        break
+            if result["success"]:
+                stats["success"] += 1
+                print(f"   ✅ 成功入库")
+            else:
+                if result["method"] == "skipped":
+                    stats["skipped"] += 1
+                    print(f"   ⏭️ 跳过: {result['error']}")
+                else:
+                    stats["failed"] += 1
+                    print(f"   ❌ 失败: {result['error']}")
+                    failed_items.append({
+                        "id": item_id,
+                        "error": result.get("error", "Unknown")
+                    })
 
-                    processed_count += 1
-                    print(f"\n[{processed_count}] {slug[:50]}")
-
-                    result = await process_item(db, page, slug, title, dry_run=dry_run)
-
-                    if result.get("twitter_failed"):
-                        stats["twitter_failed"] += 1
-                        failed_items.append({
-                            "slug": slug,
-                            "error": result.get("error", "Unknown")
-                        })
-
-                    if result["success"]:
-                        stats["success"] += 1
-                        print(f"   ✅ 成功入库")
-                    else:
-                        if result["method"] == "skipped":
-                            stats["skipped"] += 1
-                            print(f"   ⏭️ 跳过: {result['error']}")
-                        else:
-                            stats["failed"] += 1
-                            print(f"   ❌ 失败: {result['error']}")
-
-                    # 保存进度
-                    if not dry_run:
-                        processed_slugs.add(slug)
-                        if processed_count % 10 == 0:
-                            save_progress({"processed_slugs": list(processed_slugs)})
-
-                page_num += 1
-
-            # 最终保存进度
+            # 保存进度
             if not dry_run:
-                save_progress({"processed_slugs": list(processed_slugs)})
+                processed_ids.add(item_id)
+                if processed_count % 10 == 0:
+                    save_progress({"processed_slugs": list(processed_ids)})
 
-        finally:
-            await browser.close()
+        page_num += 1
+
+    # 最终保存进度
+    if not dry_run:
+        save_progress({"processed_slugs": list(processed_ids)})
 
     # 保存失败记录
     failed_file = None
@@ -496,7 +409,6 @@ async def run_import_async(limit: int = None, max_pages: int = None, dry_run: bo
     print(f"✅ 成功: {stats['success']}")
     print(f"⏭️ 跳过: {stats['skipped']}")
     print(f"❌ 失败: {stats['failed']}")
-    print(f"⚠️ Twitter 失败: {stats['twitter_failed']}")
 
     if failed_file:
         print(f"\n📁 失败记录已保存: {failed_file}")
@@ -520,17 +432,17 @@ def run_import(limit: int = None, max_pages: int = None, dry_run: bool = False,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="从 AIART.PICS 导入数据到数据库 (网页爬取)",
+        description="从 AIART.PICS 导入数据到数据库 (API)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 爬取并导入
+  # 导入数据
   python import_aiart_pics.py
 
   # 限制导入数量
   python import_aiart_pics.py --limit 10
 
-  # 只爬取前 5 页
+  # 只获取前 5 页
   python import_aiart_pics.py --pages 5
 
   # 预览模式
@@ -540,10 +452,10 @@ def main():
   python import_aiart_pics.py --reset
 
 流程:
-  1. 用 Playwright 爬取 aiart.pics 列表页获取所有 slug
-  2. 访问详情页获取提示词和 x_url
-  3. 从 Twitter 获取高清图片
-  4. 使用 AI 分类后入库
+  1. 通过 API (/api/prompts) 获取提示词列表
+  2. 使用 API 返回的数据（包含提示词、图片、作者、标签）
+  3. 如需要则进行 AI 分类
+  4. 写入数据库
         """
     )
 
