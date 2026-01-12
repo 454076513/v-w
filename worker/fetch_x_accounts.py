@@ -1016,18 +1016,37 @@ class XMonitor:
         if not HAS_TWIKIT:
             raise RuntimeError("twikit not installed. Run: pip install twikit")
 
+        # 运行时获取环境变量 (确保能读到 GitHub Actions 设置的 secrets)
+        x_cookie = os.environ.get("X_COOKIE", "")
+        x_username = os.environ.get("X_USERNAME", "")
+        x_email = os.environ.get("X_EMAIL", "")
+        x_password = os.environ.get("X_PASSWORD", "")
+        proxy_url = os.environ.get("X_PROXY", "")
+
+        # 调试信息
+        print(f"[twikit] X_COOKIE env: {'set (' + str(len(x_cookie)) + ' chars)' if x_cookie else 'not set'}")
+        print(f"[twikit] X_USERNAME env: {'set' if x_username else 'not set'}")
+        print(f"[twikit] COOKIES_FILE: {COOKIES_FILE} (exists: {COOKIES_FILE.exists()})")
+
         # 初始化客户端 (支持代理)
-        if PROXY_URL:
-            print(f"[twikit] Using proxy: {PROXY_URL[:20]}...")
-            self.client = Client('en-US', proxy=PROXY_URL)
+        if proxy_url:
+            print(f"[twikit] Using proxy: {proxy_url[:20]}...")
+            self.client = Client('en-US', proxy=proxy_url)
         else:
             self.client = Client('en-US')
 
         # 尝试使用 cookies 登录 (优先使用环境变量)
-        if X_COOKIE:
+        if x_cookie:
             try:
                 import tempfile
-                cookie_data = json.loads(X_COOKIE)
+                # 支持多种格式
+                cookie_str = x_cookie.strip()
+                # 如果是单引号包裹，转换为双引号
+                if cookie_str.startswith("'") and cookie_str.endswith("'"):
+                    cookie_str = cookie_str[1:-1]
+                cookie_data = json.loads(cookie_str)
+                print(f"[twikit] Parsed cookie keys: {list(cookie_data.keys())}")
+
                 # 写入临时文件供 twikit 加载
                 with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
                     json.dump(cookie_data, f)
@@ -1037,6 +1056,9 @@ class XMonitor:
                 print("[twikit] Loaded cookies from X_COOKIE env")
                 self.logged_in = True
                 return
+            except json.JSONDecodeError as e:
+                print(f"[twikit] Failed to parse X_COOKIE JSON: {e}")
+                print(f"[twikit] X_COOKIE value (first 50 chars): {x_cookie[:50]}...")
             except Exception as e:
                 print(f"[twikit] Failed to load cookies from env: {e}")
 
@@ -1047,16 +1069,16 @@ class XMonitor:
                 self.logged_in = True
                 return
             except Exception as e:
-                print(f"[twikit] Failed to load cookies: {e}")
+                print(f"[twikit] Failed to load cookies from file: {e}")
 
         # 使用账号密码登录
-        if X_USERNAME and X_PASSWORD:
+        if x_username and x_password:
             try:
                 print("[twikit] Logging in with credentials...")
                 await self.client.login(
-                    auth_info_1=X_USERNAME,
-                    auth_info_2=X_EMAIL,
-                    password=X_PASSWORD
+                    auth_info_1=x_username,
+                    auth_info_2=x_email,
+                    password=x_password
                 )
                 # 保存 cookies
                 self.client.save_cookies(str(COOKIES_FILE))
@@ -1071,20 +1093,15 @@ class XMonitor:
         print("\n" + "=" * 60)
         print("需要 X 账号 cookies 才能获取用户时间线")
         print("=" * 60)
-        print("\n方法: 从浏览器导出 cookies")
-        print("1. 在 Chrome 登录 x.com")
-        print("2. 按 F12 打开开发者工具")
-        print("3. 切换到 Application > Cookies > https://x.com")
-        print("4. 找到以下 cookies 并复制值:")
-        print("   - auth_token")
-        print("   - ct0")
-        print("5. 创建 worker/x_cookies.json 文件:\n")
-        print('''{
-    "auth_token": "你的auth_token值",
-    "ct0": "你的ct0值"
-}''')
+        print("\n设置方法:")
+        print("1. 在 GitHub Secrets 中添加 X_COOKIE:")
+        print('   值格式: {"auth_token": "xxx", "ct0": "xxx"}')
+        print("\n2. 或者从浏览器导出 cookies:")
+        print("   - 在 Chrome 登录 x.com")
+        print("   - F12 > Application > Cookies > https://x.com")
+        print("   - 复制 auth_token 和 ct0 的值")
         print("\n" + "=" * 60)
-        raise RuntimeError("No cookies file found. See instructions above.")
+        raise RuntimeError("No X_COOKIE env or cookies file found.")
 
     async def get_user_tweets(self, username: str, count: int = 20) -> List[Dict]:
         """获取用户最新推文"""
