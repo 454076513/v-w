@@ -4,8 +4,8 @@ X/Twitter AI Art Account Monitor
 监听 AI 艺术账号，自动提取提示词并入库
 
 技术方案:
-- Twitter Syndication API: 获取用户时间线 (无需认证)
-- FxTwitter/VxTwitter API: 获取推文详情和互动数据
+- twikit: 使用 X 账号 cookies 获取用户时间线
+- FxTwitter/VxTwitter API: 获取推文详情和互动数据 (备用)
 
 使用方法:
     # 运行监听 (单次)
@@ -29,6 +29,10 @@ X/Twitter AI Art Account Monitor
 环境变量:
     DATABASE_URL        - PostgreSQL 连接字符串 (必需)
     AI_MODEL            - AI 模型 (默认: openai)
+    X_COOKIE            - X 账号 cookies JSON (推荐): '{"auth_token": "xxx", "ct0": "xxx"}'
+    X_USERNAME          - X 账号用户名 (备用登录方式)
+    X_EMAIL             - X 账号邮箱
+    X_PASSWORD          - X 账号密码
 """
 
 import os
@@ -55,8 +59,13 @@ try:
 except ImportError:
     pass
 
-# twikit 已弃用，使用 Syndication API + FxTwitter 替代
-HAS_TWIKIT = False
+# twikit
+try:
+    from twikit import Client
+    HAS_TWIKIT = True
+except ImportError:
+    HAS_TWIKIT = False
+    print("[Warning] twikit not installed. Run: pip install twikit")
 
 # HTTP 请求
 import requests
@@ -89,6 +98,18 @@ except ImportError:
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 AI_MODEL = os.environ.get("AI_MODEL", DEFAULT_MODEL)
+
+# X 账号凭证
+X_USERNAME = os.environ.get("X_USERNAME", "")
+X_EMAIL = os.environ.get("X_EMAIL", "")
+X_PASSWORD = os.environ.get("X_PASSWORD", "")
+
+# Cookies 配置 (优先使用环境变量)
+X_COOKIE = os.environ.get("X_COOKIE", "")  # JSON 字符串: '{"auth_token": "xxx", "ct0": "xxx"}'
+COOKIES_FILE = Path(__file__).parent / "x_cookies.json"
+
+# 代理配置 (如果需要)
+PROXY_URL = os.environ.get("X_PROXY", "")
 
 # 状态文件 (记录已处理的推文 ID)
 STATE_FILE = Path(__file__).parent / "x_monitor_state.json"
@@ -983,45 +1004,150 @@ def fetch_tweet_details(tweet_id: str, username: str) -> Optional[Dict]:
 # ========== X/Twitter 客户端 ==========
 
 class XMonitor:
-    """X/Twitter 监控器 - 使用 Syndication API + FxTwitter"""
+    """X/Twitter 监控器 - 使用 twikit 获取用户时间线"""
 
     def __init__(self, use_guest: bool = False):
         # use_guest 参数保留以兼容 CLI，但不再使用
-        pass
+        self.client = None
+        self.logged_in = False
 
     async def init_client(self):
-        """初始化客户端 - 使用无需认证的 API"""
-        print("[X] Using Syndication API + FxTwitter (no auth required)")
+        """初始化客户端 - 使用 twikit + cookies"""
+        if not HAS_TWIKIT:
+            raise RuntimeError("twikit not installed. Run: pip install twikit")
+
+        # 初始化客户端 (支持代理)
+        if PROXY_URL:
+            print(f"[twikit] Using proxy: {PROXY_URL[:20]}...")
+            self.client = Client('en-US', proxy=PROXY_URL)
+        else:
+            self.client = Client('en-US')
+
+        # 尝试使用 cookies 登录 (优先使用环境变量)
+        if X_COOKIE:
+            try:
+                import tempfile
+                cookie_data = json.loads(X_COOKIE)
+                # 写入临时文件供 twikit 加载
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+                    json.dump(cookie_data, f)
+                    temp_cookie_file = f.name
+                self.client.load_cookies(temp_cookie_file)
+                os.unlink(temp_cookie_file)  # 删除临时文件
+                print("[twikit] Loaded cookies from X_COOKIE env")
+                self.logged_in = True
+                return
+            except Exception as e:
+                print(f"[twikit] Failed to load cookies from env: {e}")
+
+        if COOKIES_FILE.exists():
+            try:
+                self.client.load_cookies(str(COOKIES_FILE))
+                print("[twikit] Loaded cookies from file")
+                self.logged_in = True
+                return
+            except Exception as e:
+                print(f"[twikit] Failed to load cookies: {e}")
+
+        # 使用账号密码登录
+        if X_USERNAME and X_PASSWORD:
+            try:
+                print("[twikit] Logging in with credentials...")
+                await self.client.login(
+                    auth_info_1=X_USERNAME,
+                    auth_info_2=X_EMAIL,
+                    password=X_PASSWORD
+                )
+                # 保存 cookies
+                self.client.save_cookies(str(COOKIES_FILE))
+                print("[twikit] Login successful, cookies saved")
+                self.logged_in = True
+                return
+            except Exception as e:
+                print(f"[twikit] Login failed: {e}")
+                raise
+
+        # 提示如何获取 cookies
+        print("\n" + "=" * 60)
+        print("需要 X 账号 cookies 才能获取用户时间线")
+        print("=" * 60)
+        print("\n方法: 从浏览器导出 cookies")
+        print("1. 在 Chrome 登录 x.com")
+        print("2. 按 F12 打开开发者工具")
+        print("3. 切换到 Application > Cookies > https://x.com")
+        print("4. 找到以下 cookies 并复制值:")
+        print("   - auth_token")
+        print("   - ct0")
+        print("5. 创建 worker/x_cookies.json 文件:\n")
+        print('''{
+    "auth_token": "你的auth_token值",
+    "ct0": "你的ct0值"
+}''')
+        print("\n" + "=" * 60)
+        raise RuntimeError("No cookies file found. See instructions above.")
 
     async def get_user_tweets(self, username: str, count: int = 20) -> List[Dict]:
         """获取用户最新推文"""
+        if not self.logged_in:
+            await self.init_client()
+
         tweets = []
 
-        # 方法 1: Twitter Syndication API (官方嵌入 API，最可靠)
-        print(f"   [1] Trying Syndication API...")
-        syn_tweets = fetch_user_timeline_syndication(username, count)
-        if syn_tweets:
-            for st in syn_tweets:
-                details = fetch_tweet_details(st["id"], username)
-                if details:
-                    tweets.append(details)
-                if len(tweets) >= count:
-                    break
-            if tweets:
+        try:
+            # 先获取用户信息
+            user = await self.client.get_user_by_screen_name(username)
+            if not user:
+                print(f"   [twikit] User not found: @{username}")
                 return tweets
 
-        # 方法 2: Nitter RSS (备用)
-        print(f"   [2] Trying Nitter RSS...")
-        nitter_tweets = fetch_user_timeline_nitter(username, count)
-        if nitter_tweets:
-            for nt in nitter_tweets:
-                details = fetch_tweet_details(nt["id"], username)
-                if details:
-                    tweets.append(details)
-                else:
-                    tweets.append(nt)
-                if len(tweets) >= count:
-                    break
+            # 获取用户推文
+            user_tweets = await self.client.get_user_tweets(user.id, 'Tweets', count=count)
+
+            for tweet in user_tweets:
+                try:
+                    tweet_data = {
+                        "id": tweet.id,
+                        "text": tweet.text or "",
+                        "username": username,
+                        "url": f"https://x.com/{username}/status/{tweet.id}",
+                        "likes": tweet.favorite_count or 0,
+                        "retweets": tweet.retweet_count or 0,
+                        "views": tweet.view_count or 0,
+                        "created_at": str(tweet.created_at) if tweet.created_at else None,
+                        "images": [],
+                    }
+
+                    # 提取图片
+                    if tweet.media:
+                        for media in tweet.media:
+                            if hasattr(media, 'media_url') and media.media_url:
+                                img_url = media.media_url
+                                if img_url.startswith('http://'):
+                                    img_url = img_url.replace('http://', 'https://')
+                                tweet_data["images"].append(img_url)
+                            elif hasattr(media, 'media_url_https') and media.media_url_https:
+                                tweet_data["images"].append(media.media_url_https)
+
+                    tweets.append(tweet_data)
+
+                except Exception as e:
+                    print(f"   [Warning] Failed to parse tweet: {e}")
+                    continue
+
+            print(f"   [twikit] Got {len(tweets)} tweets")
+
+        except Exception as e:
+            print(f"   [twikit] Error getting tweets: {e}")
+            # 如果 twikit 失败，尝试使用 FxTwitter 备用方案
+            print(f"   [Fallback] Trying Syndication API...")
+            syn_tweets = fetch_user_timeline_syndication(username, count)
+            if syn_tweets:
+                for st in syn_tweets:
+                    details = fetch_tweet_details(st["id"], username)
+                    if details:
+                        tweets.append(details)
+                    if len(tweets) >= count:
+                        break
 
         return tweets
 
@@ -1228,7 +1354,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="X/Twitter AI Art Account Monitor (使用 Syndication API + FxTwitter，无需认证)",
+        description="X/Twitter AI Art Account Monitor (使用 twikit + cookies 认证)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
