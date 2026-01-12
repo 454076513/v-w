@@ -1203,9 +1203,16 @@ class XMonitor:
 
                 for tweet in user_tweets:
                     try:
+                        # 优先使用 full_text 获取长推文 (note_tweet) 的完整内容
+                        tweet_text = ""
+                        try:
+                            tweet_text = tweet.full_text or tweet.text or ""
+                        except Exception:
+                            tweet_text = tweet.text or ""
+
                         tweet_data = {
                             "id": tweet.id,
-                            "text": tweet.text or "",
+                            "text": tweet_text,
                             "username": username,
                             "url": f"https://x.com/{username}/status/{tweet.id}",
                             "likes": tweet.favorite_count or 0,
@@ -1300,6 +1307,21 @@ async def process_tweet(db: Database, tweet: Dict, state: Dict,
     if not images:
         mark_tweet_processed(state, tweet_id)
         return False
+
+    # 尝试用 FxTwitter 获取更完整的文本（展开短链接、获取长推文）
+    try:
+        fx_data = fetch_with_fxtwitter(tweet_id, username)
+        fx_result = parse_fxtwitter_result(fx_data)
+        if fx_result:
+            fx_text = fx_result.get("text", "")
+            if fx_text and len(fx_text) > len(text):
+                print(f"   [FxTwitter] Got longer text: {len(text)} -> {len(fx_text)} chars")
+                text = fx_text
+            # 如果 FxTwitter 有更多图片，补充
+            if fx_result.get("images") and len(fx_result["images"]) > len(images):
+                images = fx_result["images"]
+    except Exception as e:
+        print(f"   [FxTwitter] Failed to get full text: {e}")
 
     # 显示推文信息
     print(f"\n   [Tweet] @{username} - {tweet_id}")

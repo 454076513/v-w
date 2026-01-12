@@ -397,9 +397,16 @@ class TwikitSearcher:
 
             for tweet in results:
                 try:
+                    # 优先使用 full_text 获取长推文 (note_tweet) 的完整内容
+                    tweet_text = ""
+                    try:
+                        tweet_text = tweet.full_text or tweet.text or ""
+                    except Exception:
+                        tweet_text = tweet.text or ""
+
                     tweet_data = {
                         "id": tweet.id,
-                        "text": tweet.text or "",
+                        "text": tweet_text,
                         "username": tweet.user.screen_name if tweet.user else "unknown",
                         "user_name": tweet.user.name if tweet.user else "Unknown",
                         "url": f"https://x.com/{tweet.user.screen_name}/status/{tweet.id}" if tweet.user else "",
