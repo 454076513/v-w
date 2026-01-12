@@ -39,6 +39,8 @@ import os
 import sys
 import asyncio
 import json
+import random
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -113,6 +115,16 @@ PROXY_URL = os.environ.get("X_PROXY", "")
 
 # 状态文件 (记录已处理的推文 ID)
 STATE_FILE = Path(__file__).parent / "x_monitor_state.json"
+
+# ========== 防刷配置 (Rate Limit) ==========
+# 参考: https://github.com/d60/twikit/blob/main/ratelimits.md
+
+# 请求间隔配置 (秒)
+DELAY_BETWEEN_TWEETS = (2, 5)       # 处理每条推文后的随机延迟
+DELAY_BETWEEN_ACCOUNTS = (5, 10)    # 切换账号时的随机延迟
+DELAY_ON_RATE_LIMIT = 60            # 遇到限流时的基础等待时间
+MAX_RETRIES_ON_RATE_LIMIT = 3       # 限流重试次数
+DELAY_BETWEEN_API_CALLS = (1, 3)    # API 调用间隔
 
 # 默认监听的 AI 艺术账号 (基于数据库高频统计 + twitterhot.vercel.app)
 DEFAULT_ACCOUNTS = [
@@ -1003,6 +1015,14 @@ def fetch_tweet_details(tweet_id: str, username: str) -> Optional[Dict]:
 
 # ========== X/Twitter 客户端 ==========
 
+def random_delay(delay_range: tuple, description: str = ""):
+    """添加随机延迟，模拟人类行为"""
+    delay = random.uniform(delay_range[0], delay_range[1])
+    if description:
+        print(f"   [Delay] {description}: {delay:.1f}s")
+    time.sleep(delay)
+
+
 class XMonitor:
     """X/Twitter 监控器 - 使用 twikit 获取用户时间线"""
 
@@ -1010,6 +1030,30 @@ class XMonitor:
         # use_guest 参数保留以兼容 CLI，但不再使用
         self.client = None
         self.logged_in = False
+        self.request_count = 0
+        self.last_request_time = 0
+
+    def _clear_cf_cookies(self):
+        """清理 Cloudflare cookies 避免冲突"""
+        if self.client and hasattr(self.client, '_session') and self.client._session:
+            try:
+                # 获取 session 的 cookies jar
+                session = self.client._session
+                if hasattr(session, 'cookies') and hasattr(session.cookies, 'jar'):
+                    # 删除所有 __cf_bm cookies
+                    cookies_to_remove = []
+                    for cookie in session.cookies.jar:
+                        if cookie.name == '__cf_bm':
+                            cookies_to_remove.append((cookie.name, cookie.domain))
+                    for name, domain in cookies_to_remove:
+                        try:
+                            session.cookies.delete(name, domain=domain)
+                        except:
+                            pass
+                    if cookies_to_remove:
+                        print(f"   [twikit] Cleared {len(cookies_to_remove)} __cf_bm cookies")
+            except Exception as e:
+                print(f"   [twikit] Failed to clear cookies: {e}")
 
     async def init_client(self):
         """初始化客户端 - 使用 twikit + cookies"""
@@ -1103,68 +1147,125 @@ class XMonitor:
         print("\n" + "=" * 60)
         raise RuntimeError("No X_COOKIE env or cookies file found.")
 
+    async def _handle_rate_limit(self, e: Exception, retry_count: int) -> bool:
+        """处理限流，返回是否应该重试"""
+        # 检查是否是 TooManyRequests 异常
+        if 'TooManyRequests' in str(type(e).__name__) or '429' in str(e):
+            if retry_count < MAX_RETRIES_ON_RATE_LIMIT:
+                # 尝试获取重置时间
+                wait_time = DELAY_ON_RATE_LIMIT * (retry_count + 1)  # 指数退避
+                if hasattr(e, 'rate_limit_reset') and e.rate_limit_reset:
+                    wait_time = max(wait_time, e.rate_limit_reset - time.time())
+
+                # 添加随机抖动 (jitter)
+                jitter = random.uniform(0, 10)
+                wait_time += jitter
+
+                print(f"   [Rate Limit] Waiting {wait_time:.0f}s before retry ({retry_count + 1}/{MAX_RETRIES_ON_RATE_LIMIT})...")
+                await asyncio.sleep(wait_time)
+                return True
+        return False
+
     async def get_user_tweets(self, username: str, count: int = 20) -> List[Dict]:
-        """获取用户最新推文"""
+        """获取用户最新推文 (带重试和限流处理)"""
         if not self.logged_in:
             await self.init_client()
 
         tweets = []
+        retry_count = 0
 
-        try:
-            # 先获取用户信息
-            user = await self.client.get_user_by_screen_name(username)
-            if not user:
-                print(f"   [twikit] User not found: @{username}")
+        while retry_count <= MAX_RETRIES_ON_RATE_LIMIT:
+            try:
+                # 清理可能冲突的 Cloudflare cookies
+                self._clear_cf_cookies()
+
+                # API 调用间隔
+                time_since_last = time.time() - self.last_request_time
+                if time_since_last < DELAY_BETWEEN_API_CALLS[0]:
+                    await asyncio.sleep(DELAY_BETWEEN_API_CALLS[0] - time_since_last + random.uniform(0, 1))
+
+                # 先获取用户信息
+                user = await self.client.get_user_by_screen_name(username)
+                self.last_request_time = time.time()
+                self.request_count += 1
+
+                if not user:
+                    print(f"   [twikit] User not found: @{username}")
+                    return tweets
+
+                # 短暂延迟后获取推文
+                await asyncio.sleep(random.uniform(*DELAY_BETWEEN_API_CALLS))
+
+                # 获取用户推文
+                user_tweets = await self.client.get_user_tweets(user.id, 'Tweets', count=count)
+                self.last_request_time = time.time()
+                self.request_count += 1
+
+                for tweet in user_tweets:
+                    try:
+                        tweet_data = {
+                            "id": tweet.id,
+                            "text": tweet.text or "",
+                            "username": username,
+                            "url": f"https://x.com/{username}/status/{tweet.id}",
+                            "likes": tweet.favorite_count or 0,
+                            "retweets": tweet.retweet_count or 0,
+                            "views": tweet.view_count or 0,
+                            "created_at": str(tweet.created_at) if tweet.created_at else None,
+                            "images": [],
+                        }
+
+                        # 提取图片
+                        if tweet.media:
+                            for media in tweet.media:
+                                if hasattr(media, 'media_url') and media.media_url:
+                                    img_url = media.media_url
+                                    if img_url.startswith('http://'):
+                                        img_url = img_url.replace('http://', 'https://')
+                                    tweet_data["images"].append(img_url)
+                                elif hasattr(media, 'media_url_https') and media.media_url_https:
+                                    tweet_data["images"].append(media.media_url_https)
+
+                        tweets.append(tweet_data)
+
+                    except Exception as e:
+                        print(f"   [Warning] Failed to parse tweet: {e}")
+                        continue
+
+                print(f"   [twikit] Got {len(tweets)} tweets (requests: {self.request_count})")
                 return tweets
 
-            # 获取用户推文
-            user_tweets = await self.client.get_user_tweets(user.id, 'Tweets', count=count)
+            except Exception as e:
+                error_str = str(e)
 
-            for tweet in user_tweets:
-                try:
-                    tweet_data = {
-                        "id": tweet.id,
-                        "text": tweet.text or "",
-                        "username": username,
-                        "url": f"https://x.com/{username}/status/{tweet.id}",
-                        "likes": tweet.favorite_count or 0,
-                        "retweets": tweet.retweet_count or 0,
-                        "views": tweet.view_count or 0,
-                        "created_at": str(tweet.created_at) if tweet.created_at else None,
-                        "images": [],
-                    }
-
-                    # 提取图片
-                    if tweet.media:
-                        for media in tweet.media:
-                            if hasattr(media, 'media_url') and media.media_url:
-                                img_url = media.media_url
-                                if img_url.startswith('http://'):
-                                    img_url = img_url.replace('http://', 'https://')
-                                tweet_data["images"].append(img_url)
-                            elif hasattr(media, 'media_url_https') and media.media_url_https:
-                                tweet_data["images"].append(media.media_url_https)
-
-                    tweets.append(tweet_data)
-
-                except Exception as e:
-                    print(f"   [Warning] Failed to parse tweet: {e}")
+                # 处理 cookie 冲突
+                if 'Multiple cookies exist' in error_str or '__cf_bm' in error_str:
+                    print(f"   [twikit] Cookie conflict detected, clearing and retrying...")
+                    self._clear_cf_cookies()
+                    retry_count += 1
+                    await asyncio.sleep(random.uniform(2, 5))
                     continue
 
-            print(f"   [twikit] Got {len(tweets)} tweets")
+                # 处理限流
+                if await self._handle_rate_limit(e, retry_count):
+                    retry_count += 1
+                    continue
 
-        except Exception as e:
-            print(f"   [twikit] Error getting tweets: {e}")
-            # 如果 twikit 失败，尝试使用 FxTwitter 备用方案
-            print(f"   [Fallback] Trying Syndication API...")
-            syn_tweets = fetch_user_timeline_syndication(username, count)
-            if syn_tweets:
-                for st in syn_tweets:
-                    details = fetch_tweet_details(st["id"], username)
-                    if details:
-                        tweets.append(details)
-                    if len(tweets) >= count:
-                        break
+                print(f"   [twikit] Error getting tweets: {e}")
+                break
+
+        # 如果 twikit 失败，尝试使用 FxTwitter 备用方案
+        print(f"   [Fallback] Trying Syndication API...")
+        syn_tweets = fetch_user_timeline_syndication(username, count)
+        if syn_tweets:
+            for st in syn_tweets:
+                # 添加延迟避免 Syndication API 也被限流
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+                details = fetch_tweet_details(st["id"], username)
+                if details:
+                    tweets.append(details)
+                if len(tweets) >= count:
+                    break
 
         return tweets
 
@@ -1252,6 +1353,7 @@ async def monitor_accounts(
     print(f"Viral Only: {viral_only}")
     print(f"Dry Run: {dry_run}")
     print(f"AI Model: {AI_MODEL}")
+    print(f"Rate Limit: {DELAY_BETWEEN_ACCOUNTS[0]}-{DELAY_BETWEEN_ACCOUNTS[1]}s between accounts")
     print("=" * 60)
 
     # 检查数据库
@@ -1306,12 +1408,24 @@ async def monitor_accounts(
                     elif result is True:
                         stats["prompts_saved"] += 1
 
-                # 避免请求过快
-                await asyncio.sleep(2)
+                    # 处理推文间延迟 (避免 AI API 限流)
+                    await asyncio.sleep(random.uniform(*DELAY_BETWEEN_TWEETS))
+
+                # 账号间延迟 (避免 Twitter 限流)
+                delay = random.uniform(*DELAY_BETWEEN_ACCOUNTS)
+                print(f"   [Delay] Next account in {delay:.1f}s...")
+                await asyncio.sleep(delay)
 
             except Exception as e:
+                error_str = str(e)
                 print(f"   [Error] {e}")
                 stats["errors"] += 1
+
+                # 如果是限流错误，等待更长时间
+                if 'TooManyRequests' in str(type(e).__name__) or '429' in error_str:
+                    wait_time = DELAY_ON_RATE_LIMIT + random.uniform(0, 30)
+                    print(f"   [Rate Limit] Waiting {wait_time:.0f}s before next account...")
+                    await asyncio.sleep(wait_time)
 
         # 更新状态
         state["last_check"] = datetime.now(timezone.utc).isoformat()
