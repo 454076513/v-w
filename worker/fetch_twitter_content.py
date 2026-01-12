@@ -52,6 +52,7 @@ from prompt_utils import (
     extract_prompt_simple,
     classify_prompt,
     detect_prompt_in_reply,
+    detect_prompt_in_alt,
     call_ai,
     DEFAULT_MODEL,
 )
@@ -69,6 +70,7 @@ def extract_prompt_with_ai(text: str, model: str = DEFAULT_MODEL) -> str:
 
     Returns:
         提取的 prompt 字符串，或:
+        - "Prompt in ALT": prompt 在图片 ALT 文本中
         - "Prompt in reply": prompt 在评论中
         - "No prompt found": 未找到 prompt
         - "Advertisement": 内容是广告/推广
@@ -77,6 +79,9 @@ def extract_prompt_with_ai(text: str, model: str = DEFAULT_MODEL) -> str:
 
     if result["prompt"] == "Advertisement":
         return "Advertisement"
+
+    if result["location"] == "alt":
+        return "Prompt in ALT"
 
     if result["location"] == "reply":
         return "Prompt in reply"
@@ -382,25 +387,26 @@ def parse_fxtwitter_result(data: dict) -> dict:
     result = {
         "text": "",
         "images": [],
+        "image_alt_texts": [],  # 图片 ALT 文本列表
         "user": {},
         "created_at": "",
         "stats": {},
     }
-    
+
     tweet = data.get("tweet", {})
-    
+
     if "text" in tweet:
         result["text"] = tweet["text"]
-    
+
     if "author" in tweet:
         result["user"] = {
             "name": tweet["author"].get("name", ""),
             "screen_name": tweet["author"].get("screen_name", ""),
         }
-    
+
     if "created_at" in tweet:
         result["created_at"] = tweet["created_at"]
-    
+
     # 提取互动统计
     result["stats"] = {
         "replies": tweet.get("replies", 0),
@@ -409,12 +415,15 @@ def parse_fxtwitter_result(data: dict) -> dict:
         "bookmarks": tweet.get("bookmarks", 0),
         "views": tweet.get("views", 0),
     }
-    
-    # 提取媒体
+
+    # 提取媒体 (包括 ALT 文本)
     if "media" in tweet and "photos" in tweet["media"]:
         for photo in tweet["media"]["photos"]:
             result["images"].append(photo.get("url", ""))
-    
+            alt_text = photo.get("altText", "")
+            if alt_text:
+                result["image_alt_texts"].append(alt_text)
+
     return result
 
 
@@ -423,22 +432,23 @@ def parse_vxtwitter_result(data: dict) -> dict:
     result = {
         "text": "",
         "images": [],
+        "image_alt_texts": [],  # 图片 ALT 文本列表
         "user": {},
         "created_at": "",
         "stats": {},
     }
-    
+
     if "text" in data:
         result["text"] = data["text"]
-    
+
     result["user"] = {
         "name": data.get("user_name", ""),
         "screen_name": data.get("user_screen_name", ""),
     }
-    
+
     if "date" in data:
         result["created_at"] = data["date"]
-    
+
     # 提取互动统计
     result["stats"] = {
         "replies": data.get("replies", 0),
@@ -447,13 +457,16 @@ def parse_vxtwitter_result(data: dict) -> dict:
         "bookmarks": data.get("bookmarks", 0),
         "views": data.get("views", 0),
     }
-    
-    # 提取媒体
+
+    # 提取媒体 (包括 ALT 文本)
     if "media_extended" in data:
         for media in data["media_extended"]:
             if media.get("type") == "image":
                 result["images"].append(media.get("url", ""))
-    
+                alt_text = media.get("altText", "")
+                if alt_text:
+                    result["image_alt_texts"].append(alt_text)
+
     return result
 
 
@@ -636,87 +649,74 @@ def fetch_tweet(url: str, download_images: bool = True, output_dir: str = ".",
         print()
         print(f"   🤖 AI 处理 (模型: {ai_model})")
 
-        # 先检测是否是 "prompt 在评论中" 的情况
+        # 先检测 prompt 位置
+        prompt_in_alt = detect_prompt_in_alt(result["text"])
         prompt_in_reply = detect_prompt_in_reply(result["text"])
-        if prompt_in_reply:
+
+        # 优先检查 ALT 文本
+        if prompt_in_alt and result.get("image_alt_texts"):
+            print(f"      ✓ 检测到 prompt 在 ALT 文本中")
+            result["prompt_location"] = "alt"
+
+            # 直接从 ALT 文本获取提示词 (通常第一个 ALT 就是)
+            alt_prompt = result["image_alt_texts"][0]
+            result["extracted_prompt"] = alt_prompt
+            prompt_preview = alt_prompt[:80].replace("\n", " ")
+            print(f"      ✓ 从 ALT 文本提取成功: {prompt_preview}...")
+
+            # 对提取的提示词进行分类
+            print(f"      [2/2] 分类提示词...")
+            try:
+                classification = classify_prompt_with_ai(alt_prompt, model=ai_model)
+                result["classification"] = classification
+
+                title = classification.get("title", "未知")
+                category = classification.get("category", "未知")
+                confidence = classification.get("confidence", "未知")
+                print(f"      ✓ 分类成功: {title} | {category} | 置信度: {confidence}")
+            except Exception as e:
+                print(f"      ✗ 分类失败: {e}")
+                result["classification"] = None
+
+            # 跳过后续处理
+            extracted_prompt = alt_prompt
+
+        elif prompt_in_reply:
             print(f"      ⚠️ 检测到 prompt 可能在评论/回复中")
             result["prompt_location"] = "reply"
+            extracted_prompt = None  # 将在下面处理
         else:
             result["prompt_location"] = "post"
+            extracted_prompt = None  # 将在下面处理
 
-        # 提取提示词
-        print(f"      [1/2] 提取提示词...")
-        try:
-            extracted_prompt = extract_prompt_with_ai(result["text"], model=ai_model)
-            result["extracted_prompt"] = extracted_prompt
+        # 如果不是从 ALT 提取的，使用原有逻辑
+        if result.get("prompt_location") != "alt":
+            # 提取提示词
+            print(f"      [1/2] 提取提示词...")
+            try:
+                extracted_prompt = extract_prompt_with_ai(result["text"], model=ai_model)
+                result["extracted_prompt"] = extracted_prompt
 
-            # 处理不同的提取结果
-            if extracted_prompt == "Advertisement":
-                print(f"      🚫 检测到广告/推广内容，跳过")
-                result["is_advertisement"] = True
-                result["prompt_location"] = "advertisement"
-                result["classification"] = None
-            elif extracted_prompt == "Prompt in reply":
-                print(f"      ⚠️ Prompt 在评论/回复中，尝试获取作者回复...")
-                result["prompt_location"] = "reply"
-
-                # 尝试获取作者的回复
-                # 优先使用 API 返回的实际作者用户名（URL 中的用户名可能不准确）
-                actual_author = result.get("user", {}).get("screen_name", username)
-                if actual_author != username:
-                    print(f"      ℹ️ 实际作者: @{actual_author} (URL 中: @{username})")
-                author_replies = fetch_author_replies(tweet_id, actual_author)
-                if author_replies:
-                    print(f"      ✓ 获取到 {len(author_replies)} 条作者回复")
-
-                    # 合并所有作者回复，从中提取 prompt
-                    combined_reply_text = "\n\n".join([r["text"] for r in author_replies])
-                    result["author_replies"] = author_replies
-
-                    # 尝试从回复中提取 prompt
-                    print(f"      [1.5/2] 从作者回复中提取提示词...")
-
-                    # 首先尝试正则表达式提取 (更快更可靠)
-                    reply_prompt = None
-                    for reply in author_replies:
-                        reply_prompt = extract_prompt_from_text(reply["text"])
-                        if reply_prompt:
-                            print(f"      ✓ 使用正则表达式提取成功")
-                            break
-
-                    # 如果正则没有提取到，尝试 AI 提取
-                    if not reply_prompt:
-                        print(f"      ℹ️ 正则未匹配，尝试 AI 提取...")
-                        try:
-                            # 直接调用 AI 提取，不再检测 "Prompt in reply"
-                            reply_prompt = call_ai([
-                                {
-                                    "role": "system",
-                                    "content": "You are a helpful assistant that extracts AI image generation prompts from text. Extract only the prompt itself, without any additional explanation or formatting. If no prompt is found, return 'No prompt found'."
-                                },
-                                {
-                                    "role": "user",
-                                    "content": f"Extract the AI image generation prompt from this text and return only the prompt itself:\n\n{combined_reply_text}"
-                                }
-                            ], ai_model)
-
-                            if reply_prompt == "No prompt found":
-                                reply_prompt = None
-                        except Exception as e:
-                            print(f"      ⚠️ AI 提取失败: {e}")
-                            reply_prompt = None
-
-                    if reply_prompt:
-                        extracted_prompt = reply_prompt
-                        result["extracted_prompt"] = extracted_prompt
-                        result["prompt_location"] = "reply"  # 标记是从回复中提取的
-                        prompt_preview = extracted_prompt[:80].replace("\n", " ")
-                        print(f"      ✓ 从回复中提取成功: {prompt_preview}...")
+                # 处理不同的提取结果
+                if extracted_prompt == "Advertisement":
+                    print(f"      🚫 检测到广告/推广内容，跳过")
+                    result["is_advertisement"] = True
+                    result["prompt_location"] = "advertisement"
+                    result["classification"] = None
+                elif extracted_prompt == "Prompt in ALT":
+                    # AI 识别到提示词在 ALT 中，从 ALT 文本获取
+                    print(f"      ✓ AI 检测到 prompt 在 ALT 文本中")
+                    if result.get("image_alt_texts"):
+                        alt_prompt = result["image_alt_texts"][0]
+                        result["extracted_prompt"] = alt_prompt
+                        result["prompt_location"] = "alt"
+                        prompt_preview = alt_prompt[:80].replace("\n", " ")
+                        print(f"      ✓ 从 ALT 文本提取成功: {prompt_preview}...")
 
                         # 对提取的提示词进行分类
                         print(f"      [2/2] 分类提示词...")
                         try:
-                            classification = classify_prompt_with_ai(extracted_prompt, model=ai_model)
+                            classification = classify_prompt_with_ai(alt_prompt, model=ai_model)
                             result["classification"] = classification
 
                             title = classification.get("title", "未知")
@@ -727,36 +727,109 @@ def fetch_tweet(url: str, download_images: bool = True, output_dir: str = ".",
                             print(f"      ✗ 分类失败: {e}")
                             result["classification"] = None
                     else:
-                        print(f"      ⚠️ 作者回复中也未找到提示词")
+                        print(f"      ⚠️ 未找到图片 ALT 文本")
+                        result["classification"] = None
+                elif extracted_prompt == "Prompt in reply":
+                    print(f"      ⚠️ Prompt 在评论/回复中，尝试获取作者回复...")
+                    result["prompt_location"] = "reply"
+
+                    # 尝试获取作者的回复
+                    # 优先使用 API 返回的实际作者用户名（URL 中的用户名可能不准确）
+                    actual_author = result.get("user", {}).get("screen_name", username)
+                    if actual_author != username:
+                        print(f"      ℹ️ 实际作者: @{actual_author} (URL 中: @{username})")
+                    author_replies = fetch_author_replies(tweet_id, actual_author)
+                    if author_replies:
+                        print(f"      ✓ 获取到 {len(author_replies)} 条作者回复")
+
+                        # 合并所有作者回复，从中提取 prompt
+                        combined_reply_text = "\n\n".join([r["text"] for r in author_replies])
+                        result["author_replies"] = author_replies
+
+                        # 尝试从回复中提取 prompt
+                        print(f"      [1.5/2] 从作者回复中提取提示词...")
+
+                        # 首先尝试正则表达式提取 (更快更可靠)
+                        reply_prompt = None
+                        for reply in author_replies:
+                            reply_prompt = extract_prompt_from_text(reply["text"])
+                            if reply_prompt:
+                                print(f"      ✓ 使用正则表达式提取成功")
+                                break
+
+                        # 如果正则没有提取到，尝试 AI 提取
+                        if not reply_prompt:
+                            print(f"      ℹ️ 正则未匹配，尝试 AI 提取...")
+                            try:
+                                # 直接调用 AI 提取，不再检测 "Prompt in reply"
+                                reply_prompt = call_ai([
+                                    {
+                                        "role": "system",
+                                        "content": "You are a helpful assistant that extracts AI image generation prompts from text. Extract only the prompt itself, without any additional explanation or formatting. If no prompt is found, return 'No prompt found'."
+                                    },
+                                    {
+                                        "role": "user",
+                                        "content": f"Extract the AI image generation prompt from this text and return only the prompt itself:\n\n{combined_reply_text}"
+                                    }
+                                ], ai_model)
+
+                                if reply_prompt == "No prompt found":
+                                    reply_prompt = None
+                            except Exception as e:
+                                print(f"      ⚠️ AI 提取失败: {e}")
+                                reply_prompt = None
+
+                        if reply_prompt:
+                            extracted_prompt = reply_prompt
+                            result["extracted_prompt"] = extracted_prompt
+                            result["prompt_location"] = "reply"  # 标记是从回复中提取的
+                            prompt_preview = extracted_prompt[:80].replace("\n", " ")
+                            print(f"      ✓ 从回复中提取成功: {prompt_preview}...")
+
+                            # 对提取的提示词进行分类
+                            print(f"      [2/2] 分类提示词...")
+                            try:
+                                classification = classify_prompt_with_ai(extracted_prompt, model=ai_model)
+                                result["classification"] = classification
+
+                                title = classification.get("title", "未知")
+                                category = classification.get("category", "未知")
+                                confidence = classification.get("confidence", "未知")
+                                print(f"      ✓ 分类成功: {title} | {category} | 置信度: {confidence}")
+                            except Exception as e:
+                                print(f"      ✗ 分类失败: {e}")
+                                result["classification"] = None
+                        else:
+                            print(f"      ⚠️ 作者回复中也未找到提示词")
+                            result["classification"] = None
+                    else:
+                        print(f"      ⚠️ 未获取到作者回复 (可能需要配置 cookies)")
+                        result["classification"] = None
+                elif extracted_prompt and extracted_prompt != "No prompt found":
+                    prompt_preview = extracted_prompt[:80].replace("\n", " ")
+                    print(f"      ✓ 提取成功: {prompt_preview}...")
+                    result["prompt_location"] = "post"
+
+                    # 对提取的提示词进行分类
+                    print(f"      [2/2] 分类提示词...")
+                    try:
+                        classification = classify_prompt_with_ai(extracted_prompt, model=ai_model)
+                        result["classification"] = classification
+
+                        title = classification.get("title", "未知")
+                        category = classification.get("category", "未知")
+                        confidence = classification.get("confidence", "未知")
+                        print(f"      ✓ 分类成功: {title} | {category} | 置信度: {confidence}")
+                    except Exception as e:
+                        print(f"      ✗ 分类失败: {e}")
                         result["classification"] = None
                 else:
-                    print(f"      ⚠️ 未获取到作者回复 (可能需要配置 cookies)")
+                    print(f"      ⚠️ 未找到提示词")
                     result["classification"] = None
-            elif extracted_prompt and extracted_prompt != "No prompt found":
-                prompt_preview = extracted_prompt[:80].replace("\n", " ")
-                print(f"      ✓ 提取成功: {prompt_preview}...")
-                result["prompt_location"] = "post"
-
-                # 对提取的提示词进行分类
-                print(f"      [2/2] 分类提示词...")
-                try:
-                    classification = classify_prompt_with_ai(extracted_prompt, model=ai_model)
-                    result["classification"] = classification
-
-                    title = classification.get("title", "未知")
-                    category = classification.get("category", "未知")
-                    confidence = classification.get("confidence", "未知")
-                    print(f"      ✓ 分类成功: {title} | {category} | 置信度: {confidence}")
-                except Exception as e:
-                    print(f"      ✗ 分类失败: {e}")
-                    result["classification"] = None
-            else:
-                print(f"      ⚠️ 未找到提示词")
+            except Exception as e:
+                print(f"      ✗ 提取失败: {e}")
+                result["extracted_prompt"] = None
                 result["classification"] = None
-        except Exception as e:
-            print(f"      ✗ 提取失败: {e}")
-            result["extracted_prompt"] = None
-            result["classification"] = None
 
     # 完成
     elapsed = (datetime.now() - start_time).total_seconds()
@@ -776,7 +849,13 @@ def fetch_tweet(url: str, download_images: bool = True, output_dir: str = ".",
         return result
 
     if has_valid_prompt:
-        if prompt_location == "reply":
+        if prompt_location == "alt":
+            print(f"✅ [SUCCESS_FROM_ALT] 推文处理完成: {url}")
+            print(f"   用户: @{username} | 推文ID: {tweet_id}")
+            print(f"   获取方式: {fetch_method}")
+            print(f"   图片数量: {len(result.get('images', []))}")
+            print(f"   提示词: 已从图片 ALT 文本提取")
+        elif prompt_location == "reply":
             print(f"✅ [SUCCESS_FROM_REPLY] 推文处理完成: {url}")
             print(f"   用户: @{username} | 推文ID: {tweet_id}")
             print(f"   获取方式: {fetch_method}")

@@ -337,6 +337,40 @@ def detect_prompt_in_reply(text: str) -> bool:
     return False
 
 
+# 检测 "prompt 在 ALT 文本中" 的指示符模式
+PROMPT_IN_ALT_PATTERNS = [
+    r'prompt\s+in\s+(the\s+)?alt',
+    r'alt\s+for\s+prompt',
+    r'see\s+alt',
+    r'check\s+alt',
+    r'\(prompt\s+in\s+alt\s*!?\s*\)',
+    r'提示词在\s*alt',
+    r'alt\s*里',
+]
+
+
+def detect_prompt_in_alt(text: str) -> bool:
+    """
+    检测文本是否表明 prompt 在图片 ALT 文本中
+
+    Args:
+        text: 文本内容
+
+    Returns:
+        True 如果检测到 prompt 可能在 ALT 文本中
+    """
+    if not text:
+        return False
+
+    text_lower = text.lower()
+
+    for pattern in PROMPT_IN_ALT_PATTERNS:
+        if re.search(pattern, text_lower, re.IGNORECASE):
+            return True
+
+    return False
+
+
 # ========== 提示词提取 ==========
 
 def extract_prompt_regex(text: str) -> str:
@@ -401,7 +435,14 @@ def extract_prompt(text: str, model: str = DEFAULT_MODEL, use_ai: bool = True) -
     if not text:
         return result
 
-    # 首先检测是否是 "prompt 在评论中" 的情况
+    # 首先检测是否是 "prompt 在 ALT 中" 的情况 (优先级最高)
+    if detect_prompt_in_alt(text):
+        result["prompt"] = "Prompt in ALT"
+        result["location"] = "alt"
+        result["method"] = "pattern"
+        return result
+
+    # 检测是否是 "prompt 在评论中" 的情况
     if detect_prompt_in_reply(text):
         result["prompt"] = "Prompt in reply"
         result["location"] = "reply"
@@ -420,9 +461,13 @@ def extract_prompt(text: str, model: str = DEFAULT_MODEL, use_ai: bool = True) -
     if use_ai:
         try:
             ai_result = _extract_prompt_with_ai(text, model)
-            if ai_result and ai_result not in ["No prompt found", "Prompt in reply", "Advertisement"]:
+            if ai_result and ai_result not in ["No prompt found", "Prompt in reply", "Prompt in ALT", "Advertisement"]:
                 result["prompt"] = ai_result
                 result["location"] = "post"
+                result["method"] = "ai"
+            elif ai_result == "Prompt in ALT":
+                result["prompt"] = "Prompt in ALT"
+                result["location"] = "alt"
                 result["method"] = "ai"
             elif ai_result == "Prompt in reply":
                 result["prompt"] = "Prompt in reply"
@@ -473,18 +518,19 @@ IMPORTANT RULES:
 
 2. Extract only the actual prompt itself, without any additional explanation or formatting.
 3. If the text contains indicators like "Prompt👇", "prompt below", "check comment", "prompt in reply" etc., it means the actual prompt is in a reply/comment, not in the main post. In this case, return 'Prompt in reply'.
-4. If the text only contains a title or description of what the image shows (like "Nano Banana prompt" or "Any person to Trash Pop Collage") but NOT the actual detailed prompt, return 'No prompt found'.
-5. A real AI image generation prompt usually contains:
+4. If the text contains indicators like "Prompt in ALT", "see ALT", "check ALT", "ALT for prompt", or mentions that the prompt is in the image's alt text, return 'Prompt in ALT'.
+5. If the text only contains a title or description of what the image shows (like "Nano Banana prompt" or "Any person to Trash Pop Collage") but NOT the actual detailed prompt, return 'No prompt found'.
+6. A real AI image generation prompt usually contains:
    - Detailed scene descriptions (subjects, actions, environments)
    - Visual style specifications (lighting, colors, mood)
    - Technical parameters (--ar, --v, --style, resolution)
    - Art style references (photorealistic, anime, oil painting, etc.)
-6. The following are NOT prompts - return 'No prompt found':
+7. The following are NOT prompts - return 'No prompt found':
    - Lists of AI tools or software names
    - News or commentary about AI
    - Tutorials without actual prompts
    - General discussions about image generation
-7. If no actual prompt is found, return 'No prompt found'."""
+8. If no actual prompt is found, return 'No prompt found'."""
         },
         {
             "role": "user",
