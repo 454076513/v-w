@@ -2,8 +2,8 @@ name: Monitor X Accounts
 
 on:
   schedule:
-    # 每小时运行一次
-    - cron: "0 * * * *"
+    # 每 12 小时运行一次 (00:00 和 12:00 UTC)
+    - cron: "0 */12 * * *"
   workflow_dispatch: # 允许手动触发
     inputs:
       top:
