@@ -155,7 +155,14 @@ def fetch_author_replies(tweet_id: str, author_username: str) -> list:
                                 user_legacy = user_results.get('legacy', {})
 
                                 username = user_legacy.get('screen_name', '')
-                                text = legacy.get('full_text', '')
+
+                                # 优先使用 note_tweet (长推文) 的文本
+                                note_tweet = tweet_result.get('note_tweet', {})
+                                if note_tweet:
+                                    text = note_tweet.get('note_tweet_results', {}).get('result', {}).get('text', '')
+                                    print(f"DEBUG: Found note_tweet with {len(text)} chars", file=sys.stderr)
+                                else:
+                                    text = legacy.get('full_text', '')
 
                                 # 只保留作者的回复
                                 if username.lower() == author_username.lower():
