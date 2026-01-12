@@ -461,22 +461,57 @@ def extract_prompt(text: str, model: str = DEFAULT_MODEL, use_ai: bool = True) -
     if use_ai:
         try:
             ai_result = _extract_prompt_with_ai(text, model)
-            if ai_result and ai_result not in ["No prompt found", "Prompt in reply", "Prompt in ALT", "Advertisement"]:
-                result["prompt"] = ai_result
-                result["location"] = "post"
-                result["method"] = "ai"
-            elif ai_result == "Prompt in ALT":
-                result["prompt"] = "Prompt in ALT"
-                result["location"] = "alt"
-                result["method"] = "ai"
-            elif ai_result == "Prompt in reply":
-                result["prompt"] = "Prompt in reply"
-                result["location"] = "reply"
-                result["method"] = "ai"
-            elif ai_result == "Advertisement":
-                result["prompt"] = "Advertisement"
-                result["location"] = None
-                result["method"] = "ai"
+
+            # 检测是否为广告/无效内容（AI 有时返回解释性文字而非精确关键词）
+            if ai_result:
+                ai_lower = ai_result.lower()
+                is_ad = (
+                    ai_result == "Advertisement" or
+                    "promotional content" in ai_lower or
+                    "advertisement" in ai_lower or
+                    "does not contain" in ai_lower or
+                    "no actual prompt" in ai_lower or
+                    "not an actual prompt" in ai_lower or
+                    "is not a prompt" in ai_lower or
+                    "doesn't contain" in ai_lower or
+                    "self-promotion" in ai_lower or
+                    "engagement bait" in ai_lower
+                )
+                is_no_prompt = (
+                    ai_result == "No prompt found" or
+                    "no prompt" in ai_lower or
+                    "not found" in ai_lower
+                )
+                is_in_alt = (
+                    ai_result == "Prompt in ALT" or
+                    "prompt in alt" in ai_lower
+                )
+                is_in_reply = (
+                    ai_result == "Prompt in reply" or
+                    "prompt in reply" in ai_lower or
+                    "in the reply" in ai_lower or
+                    "in the comment" in ai_lower
+                )
+
+                if is_ad:
+                    result["prompt"] = "Advertisement"
+                    result["location"] = None
+                    result["method"] = "ai"
+                elif is_in_alt:
+                    result["prompt"] = "Prompt in ALT"
+                    result["location"] = "alt"
+                    result["method"] = "ai"
+                elif is_in_reply:
+                    result["prompt"] = "Prompt in reply"
+                    result["location"] = "reply"
+                    result["method"] = "ai"
+                elif is_no_prompt:
+                    # 不设置 prompt，保持为 None
+                    result["method"] = "ai"
+                elif ai_result not in ["No prompt found", "Prompt in reply", "Prompt in ALT", "Advertisement"]:
+                    result["prompt"] = ai_result
+                    result["location"] = "post"
+                    result["method"] = "ai"
         except Exception as e:
             print(f"⚠️ AI 提取失败: {e}")
 
