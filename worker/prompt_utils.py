@@ -301,17 +301,20 @@ def _call_nvidia_ai(messages: list) -> str:
 # ========== 提示词检测 ==========
 
 # 检测 "prompt 在评论中" 的指示符模式
+# 向下箭头符号: 👇⬇️↓🔽⤵️
 PROMPT_IN_REPLY_PATTERNS = [
-    r'prompt\s*[👇⬇️↓🔽]',
-    r'[👇⬇️↓🔽]\s*prompt',
+    r'prompt\s*[👇⬇️↓🔽⤵️]',
+    r'[👇⬇️↓🔽⤵️]\s*prompt',
     r'prompt\s+below',
     r'prompt\s+in\s+(the\s+)?(comment|reply|replies|thread)',
     r'check\s+(the\s+)?(comment|reply|replies)',
     r'see\s+(the\s+)?(comment|reply|replies)',
     r'(comment|reply|replies)\s+for\s+prompt',
-    r'full\s+prompt\s+[👇⬇️↓🔽]',
-    r'提示词\s*[👇⬇️↓🔽]',
-    r'[👇⬇️↓🔽]\s*提示词',
+    r'full\s+prompt\s+[👇⬇️↓🔽⤵️]',
+    r'提示词\s*[👇⬇️↓🔽⤵️]',
+    r'[👇⬇️↓🔽⤵️]\s*提示词',
+    # 文末带向下箭头表示内容在下方（即使不紧跟 prompt 关键词）
+    r'[👇⬇️↓🔽⤵️]\s*$',
 ]
 
 
@@ -376,7 +379,7 @@ def detect_prompt_in_alt(text: str) -> bool:
 def extract_prompt_regex(text: str) -> str:
     """
     使用正则表达式从文本中提取 prompt
-    用于快速提取格式规范的 prompt，避免 AI 调用
+    仅处理最简单、最确定的格式，其他情况交给 AI
 
     Args:
         text: 文本内容
@@ -387,23 +390,16 @@ def extract_prompt_regex(text: str) -> str:
     if not text:
         return None
 
-    # 常见的 prompt 引导模式
-    patterns = [
-        # 👉Prompt: ... 或 Prompt: ...
-        r'(?:👉\s*)?[Pp]rompt[:\s]+(.+)',
-        # "prompt" 后面跟着换行和内容
-        r'[Pp]rompt\s*\n+(.+)',
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
-        if match:
-            prompt = match.group(1).strip()
-            # 清理开头的引号、括号等
-            prompt = re.sub(r'^[\"\'\[\(]+', '', prompt)
-            # 如果 prompt 足够长，认为是有效的
-            if len(prompt) > 50:
-                return prompt
+    # 只匹配最明确的格式: "Prompt:" 后面紧跟冒号
+    # 其他复杂情况交给 AI 判断
+    match = re.search(r'(?:👉\s*)?[Pp]rompt\s*:\s*(.+)', text, re.DOTALL)
+    if match:
+        prompt = match.group(1).strip()
+        # 清理开头的引号、括号等
+        prompt = re.sub(r'^[\"\'\[\(]+', '', prompt)
+        # prompt 足够长才认为有效
+        if len(prompt) > 50:
+            return prompt
 
     return None
 
@@ -412,12 +408,12 @@ def extract_prompt(text: str, model: str = DEFAULT_MODEL, use_ai: bool = True) -
     """
     从文本中提取提示词（主函数）
 
-    先尝试正则表达式，失败后使用 AI
+    优先使用 AI 判断，正则仅作为辅助
 
     Args:
         text: 文本内容
         model: AI 模型名称
-        use_ai: 是否使用 AI（正则失败时）
+        use_ai: 是否使用 AI
 
     Returns:
         dict: {
@@ -435,29 +431,7 @@ def extract_prompt(text: str, model: str = DEFAULT_MODEL, use_ai: bool = True) -
     if not text:
         return result
 
-    # 首先检测是否是 "prompt 在 ALT 中" 的情况 (优先级最高)
-    if detect_prompt_in_alt(text):
-        result["prompt"] = "Prompt in ALT"
-        result["location"] = "alt"
-        result["method"] = "pattern"
-        return result
-
-    # 检测是否是 "prompt 在评论中" 的情况
-    if detect_prompt_in_reply(text):
-        result["prompt"] = "Prompt in reply"
-        result["location"] = "reply"
-        result["method"] = "pattern"
-        return result
-
-    # 尝试正则表达式提取
-    regex_result = extract_prompt_regex(text)
-    if regex_result:
-        result["prompt"] = regex_result
-        result["location"] = "post"
-        result["method"] = "regex"
-        return result
-
-    # 使用 AI 提取
+    # 优先使用 AI 提取（更智能、更准确）
     if use_ai:
         try:
             ai_result = _extract_prompt_with_ai(text, model)
@@ -552,7 +526,12 @@ IMPORTANT RULES:
    If it's an advertisement or tool list, return 'Advertisement'.
 
 2. Extract only the actual prompt itself, without any additional explanation or formatting.
-3. If the text contains indicators like "Prompt👇", "prompt below", "check comment", "prompt in reply" etc., it means the actual prompt is in a reply/comment, not in the main post. In this case, return 'Prompt in reply'.
+3. CRITICAL: Check if the prompt is NOT in the main post but in a reply/comment. Return 'Prompt in reply' if:
+   - Text ends with down arrow emoji: 👇 ⬇️ ↓ 🔽 ⤵️ (these mean "see below/in comments")
+   - Text says "prompt below", "check comment", "prompt in reply", "see thread"
+   - Text discusses a prompt (e.g., "This prompt works great!", "Try this prompt") but doesn't include the actual detailed prompt text
+   - Text is short (under 200 chars) and talks ABOUT a prompt without containing one
+   When in doubt and the text ends with ⤵️ or similar arrows, return 'Prompt in reply'.
 4. If the text contains indicators like "Prompt in ALT", "see ALT", "check ALT", "ALT for prompt", or mentions that the prompt is in the image's alt text, return 'Prompt in ALT'.
 5. If the text only contains a title or description of what the image shows (like "Nano Banana prompt" or "Any person to Trash Pop Collage") but NOT the actual detailed prompt, return 'No prompt found'.
 6. A real AI image generation prompt usually contains:
