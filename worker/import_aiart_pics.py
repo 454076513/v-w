@@ -52,6 +52,7 @@ except ImportError:
 # 导入主模块
 from main import Database, AI_MODEL
 from prompt_utils import process_tweet_for_import
+from fetch_twitter_content import fetch_with_fxtwitter, parse_fxtwitter_result
 
 # ========== 配置 ==========
 BASE_URL = "https://aiart.pics"
@@ -63,6 +64,56 @@ PROGRESS_FILE = CACHE_DIR / "aiart_pics_import_progress.json"
 
 # 失败记录
 FAILED_OUTPUT_DIR = Path(__file__).parent / "failed_imports"
+
+# 默认过滤阈值
+DEFAULT_MIN_LIKES = 100
+DEFAULT_MIN_RETWEETS = 0
+
+
+def extract_tweet_info(x_url: str) -> tuple:
+    """从 X URL 提取 tweet_id 和 username"""
+    import re
+    match = re.search(r'x\.com/([^/]+)/status/(\d+)', x_url)
+    if match:
+        return match.group(2), match.group(1)  # tweet_id, username
+    return None, None
+
+
+def fetch_engagement_stats(x_url: str) -> dict:
+    """获取推文互动数据"""
+    tweet_id, username = extract_tweet_info(x_url)
+    if not tweet_id:
+        return {}
+
+    try:
+        fx_data = fetch_with_fxtwitter(tweet_id, username)
+        fx_result = parse_fxtwitter_result(fx_data)
+        return fx_result.get("stats", {})
+    except Exception as e:
+        print(f"   ⚠️ 获取互动数据失败: {e}")
+        return {}
+
+
+def check_engagement_threshold(stats: dict, min_likes: int = 0, min_retweets: int = 0) -> tuple:
+    """
+    检查互动数据是否达到阈值
+
+    Returns:
+        (passed: bool, reason: str)
+    """
+    if min_likes <= 0 and min_retweets <= 0:
+        return True, ""
+
+    likes = stats.get("likes", 0)
+    retweets = stats.get("retweets", 0)
+
+    if min_likes > 0 and likes < min_likes:
+        return False, f"likes {likes} < {min_likes}"
+
+    if min_retweets > 0 and retweets < min_retweets:
+        return False, f"retweets {retweets} < {min_retweets}"
+
+    return True, ""
 
 
 def fetch_prompts_from_api(limit: int = 50, offset: int = 0) -> List[Dict]:
@@ -200,7 +251,8 @@ def process_api_item(db: Database, api_data: Dict, dry_run: bool = False) -> Dic
 
 
 async def run_import_async(limit: int = None, max_pages: int = None, dry_run: bool = False,
-                           resume: bool = True, reset_progress: bool = False):
+                           resume: bool = True, reset_progress: bool = False,
+                           min_likes: int = DEFAULT_MIN_LIKES, min_retweets: int = DEFAULT_MIN_RETWEETS):
     """异步导入流程 - 通过 API 获取数据"""
     print("=" * 70)
     print("📦 AIART.PICS 导入 (API + Twitter)")
@@ -212,6 +264,8 @@ async def run_import_async(limit: int = None, max_pages: int = None, dry_run: bo
         print(f"限制数量: {limit}")
     if max_pages:
         print(f"最大页数: {max_pages}")
+    if min_likes > 0 or min_retweets > 0:
+        print(f"过滤条件: min_likes={min_likes}, min_retweets={min_retweets}")
     print("=" * 70)
 
     # 重置进度
@@ -245,6 +299,7 @@ async def run_import_async(limit: int = None, max_pages: int = None, dry_run: bo
         "items_found": 0,
         "success": 0,
         "skipped": 0,
+        "filtered": 0,  # 互动数不达标
         "failed": 0,
         "twitter_failed": 0,
     }
@@ -306,6 +361,29 @@ async def run_import_async(limit: int = None, max_pages: int = None, dry_run: bo
             print(f"\n[{processed_count}] {title_display}")
             print(f"   🔗 X: {api_data.get('x_url', '')[:60]}")
 
+            # 互动数过滤
+            if min_likes > 0 or min_retweets > 0:
+                x_url = api_data.get("x_url", "")
+                engagement = fetch_engagement_stats(x_url)
+                if engagement:
+                    likes = engagement.get("likes", 0)
+                    retweets = engagement.get("retweets", 0)
+                    print(f"   📊 互动: ❤️ {likes:,} | 🔁 {retweets:,}")
+
+                    passed, reason = check_engagement_threshold(engagement, min_likes, min_retweets)
+                    if not passed:
+                        stats["filtered"] += 1
+                        print(f"   ⏭️ 过滤: {reason}")
+                        # 记录已处理，避免重复检查
+                        if not dry_run:
+                            processed_ids.add(item_id)
+                        continue
+                else:
+                    # 无法获取互动数据时跳过
+                    stats["filtered"] += 1
+                    print(f"   ⏭️ 过滤: 无法获取互动数据")
+                    continue
+
             result = process_api_item(db, api_data, dry_run=dry_run)
 
             # 记录 Twitter 处理失败
@@ -362,6 +440,8 @@ async def run_import_async(limit: int = None, max_pages: int = None, dry_run: bo
     print(f"发现记录: {stats['items_found']}")
     print(f"✅ 成功: {stats['success']}")
     print(f"⏭️ 跳过: {stats['skipped']}")
+    if stats['filtered'] > 0:
+        print(f"📊 过滤 (互动不足): {stats['filtered']}")
     print(f"❌ 失败: {stats['failed']}")
     print(f"⚠️ Twitter 失败: {stats['twitter_failed']}")
 
@@ -374,7 +454,8 @@ async def run_import_async(limit: int = None, max_pages: int = None, dry_run: bo
 
 
 def run_import(limit: int = None, max_pages: int = None, dry_run: bool = False,
-               resume: bool = True, reset_progress: bool = False):
+               resume: bool = True, reset_progress: bool = False,
+               min_likes: int = DEFAULT_MIN_LIKES, min_retweets: int = DEFAULT_MIN_RETWEETS):
     """同步入口"""
     # 使用 asyncio.run 运行异步函数
     try:
@@ -383,7 +464,9 @@ def run_import(limit: int = None, max_pages: int = None, dry_run: bool = False,
             max_pages=max_pages,
             dry_run=dry_run,
             resume=resume,
-            reset_progress=reset_progress
+            reset_progress=reset_progress,
+            min_likes=min_likes,
+            min_retweets=min_retweets
         ))
     except KeyboardInterrupt:
         print("\n\n⚠️ 用户中断，进度已保存")
@@ -405,6 +488,9 @@ def main():
   # 只获取前 5 页
   python import_aiart_pics.py --pages 5
 
+  # 只导入高互动内容 (≥100赞)
+  python import_aiart_pics.py --min-likes 100
+
   # 预览模式
   python import_aiart_pics.py --dry-run --limit 5
 
@@ -413,7 +499,7 @@ def main():
 
 流程:
   1. 通过 API (/api/prompts) 获取提示词列表
-  2. 使用 API 返回的数据（包含提示词、图片、作者、标签）
+  2. 获取 Twitter 互动数据并过滤
   3. 如需要则进行 AI 分类
   4. 写入数据库
         """
@@ -421,6 +507,10 @@ def main():
 
     parser.add_argument("--limit", "-l", type=int, help="限制导入数量")
     parser.add_argument("--pages", "-p", type=int, default=2, help="最大爬取页数 (默认: 2)")
+    parser.add_argument("--min-likes", type=int, default=DEFAULT_MIN_LIKES,
+                        help=f"最低点赞数过滤 (默认: {DEFAULT_MIN_LIKES}, 0=不过滤)")
+    parser.add_argument("--min-retweets", type=int, default=DEFAULT_MIN_RETWEETS,
+                        help=f"最低转发数过滤 (默认: {DEFAULT_MIN_RETWEETS}, 0=不过滤)")
     parser.add_argument("--dry-run", "-d", action="store_true", help="预览模式")
     parser.add_argument("--no-resume", action="store_true", help="禁用断点续传")
     parser.add_argument("--reset", action="store_true", help="重置进度")
@@ -432,7 +522,9 @@ def main():
         max_pages=args.pages,
         dry_run=args.dry_run,
         resume=not args.no_resume,
-        reset_progress=args.reset
+        reset_progress=args.reset,
+        min_likes=args.min_likes,
+        min_retweets=args.min_retweets
     )
 
 
