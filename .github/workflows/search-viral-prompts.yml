@@ -20,7 +20,7 @@ on:
         description: "只处理最近N小时的推文 (0=不限制)"
         required: false
         type: number
-        default: 6
+        default: 20
       dry_run:
         description: "预览模式（不写入数据库）"
         required: false
@@ -60,7 +60,7 @@ jobs:
           GITEE_AI_API_KEY: ${{ secrets.GITEE_AI_API_KEY }}
         run: |
           cd worker
-          python search_viral_prompts.py --min-likes 30 --hours 6 --count 30
+          python search_viral_prompts.py --min-likes 30 --hours 20 --count 30
 
       - name: Run search (manual)
         if: github.event_name == 'workflow_dispatch'
