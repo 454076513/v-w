@@ -69,29 +69,7 @@ PROGRESS_FILE = CACHE_DIR / "import_progress.json"
 # 失败记录输出目录
 FAILED_OUTPUT_DIR = Path(__file__).parent / "failed_imports"
 
-# 分类映射: OpenNana tags -> 系统分类
-TAG_TO_CATEGORY = {
-    "portrait": "Portrait",
-    "landscape": "Landscape",
-    "nature": "Nature",
-    "architecture": "Architecture",
-    "abstract": "Abstract",
-    "cartoon": "Anime",
-    "anime": "Anime",
-    "photography": "Photography",
-    "illustration": "Illustration",
-    "infographic": "Illustration",
-    "typography": "Illustration",
-    "fashion": "Fashion",
-    "food": "Food",
-    "product": "Product",
-    "vehicle": "Product",
-    "gaming": "Sci-Fi",
-    "neon": "Cinematic",
-    "creative": "Other",
-    "paper-craft": "Clay / Felt",
-    "character": "Portrait",
-}
+# 分类由 process_tweet_for_import 统一处理，无需单独导入标签映射
 
 
 def fetch_prompt_list(page: int = 1, limit: int = 100) -> Optional[Dict]:
@@ -393,20 +371,6 @@ def extract_twitter_url(source: Dict) -> Optional[str]:
         return url.replace("twitter.com", "x.com")
     
     return None
-
-
-def infer_category_from_tags(tags: List[str]) -> str:
-    """从 tags 推断分类"""
-    if not tags:
-        return "Other"
-    
-    for tag in tags:
-        tag_lower = tag.lower()
-        if tag_lower in TAG_TO_CATEGORY:
-            return TAG_TO_CATEGORY[tag_lower]
-    
-    # 默认分类
-    return "Illustration"
 
 
 def process_opennana_item(db: Database, item: Dict, skip_twitter: bool = False, dry_run: bool = False) -> Dict[str, Any]:

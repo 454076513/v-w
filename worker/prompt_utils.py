@@ -617,28 +617,316 @@ def extract_prompt_simple(text: str, model: str = DEFAULT_MODEL) -> str:
 
 # ========== 提示词分类 ==========
 
-# 预定义的分类列表
+# 预定义的分类列表 (统一分类系统)
+# 注意: AI 返回的 category 应该使用英文部分 (括号内)
 PROMPT_CATEGORIES = [
     "人像/肖像 (Portrait)",
-    "风景/自然 (Landscape/Nature)",
-    "动物 (Animals)",
-    "建筑/城市 (Architecture/Urban)",
-    "抽象艺术 (Abstract Art)",
-    "科幻/未来 (Sci-Fi/Futuristic)",
-    "奇幻/魔法 (Fantasy/Magic)",
-    "动漫/卡通 (Anime/Cartoon)",
-    "写实摄影 (Realistic Photography)",
-    "插画/绘画 (Illustration/Painting)",
-    "时尚/服装 (Fashion/Clothing)",
+    "风景 (Landscape)",
+    "自然/动物 (Nature)",
+    "建筑/城市 (Architecture)",
+    "抽象艺术 (Abstract)",
+    "科幻/未来 (Sci-Fi)",
+    "奇幻/魔法 (Fantasy)",
+    "动漫/卡通 (Anime)",
+    "写实摄影 (Photography)",
+    "插画/绘画 (Illustration)",
+    "时尚/服装 (Fashion)",
     "食物/美食 (Food)",
-    "产品/商业 (Product/Commercial)",
-    "恐怖/黑暗 (Horror/Dark)",
-    "可爱/萌系 (Cute/Kawaii)",
-    "复古/怀旧 (Vintage/Retro)",
+    "产品/商业 (Product)",
+    "电影感/影视 (Cinematic)",
+    "恐怖/黑暗 (Horror)",
+    "可爱/萌系 (Cute)",
+    "复古/怀旧 (Retro)",
     "极简主义 (Minimalist)",
     "超现实 (Surreal)",
+    "3D渲染 (3D Render)",
+    "赛博朋克 (Cyberpunk)",
+    "像素艺术 (Pixel Art)",
     "其他 (Other)",
 ]
+
+# 分类英文名列表 (用于验证和映射)
+VALID_CATEGORIES = [
+    "Portrait", "Landscape", "Nature", "Architecture", "Abstract",
+    "Sci-Fi", "Fantasy", "Anime", "Photography", "Illustration",
+    "Fashion", "Food", "Product", "Cinematic", "Horror", "Cute",
+    "Retro", "Minimalist", "Surreal", "3D Render", "Cyberpunk",
+    "Pixel Art", "Other"
+]
+
+# 统一分类映射表: AI 可能返回的各种格式 -> 标准分类名
+# 所有脚本应该导入此映射表以保持一致性
+CATEGORY_MAP = {
+    # 标准分类 (直接映射)
+    "Portrait": "Portrait",
+    "Landscape": "Landscape",
+    "Nature": "Nature",
+    "Architecture": "Architecture",
+    "Abstract": "Abstract",
+    "Sci-Fi": "Sci-Fi",
+    "Fantasy": "Fantasy",
+    "Anime": "Anime",
+    "Photography": "Photography",
+    "Illustration": "Illustration",
+    "Fashion": "Fashion",
+    "Food": "Food",
+    "Product": "Product",
+    "Cinematic": "Cinematic",
+    "Horror": "Horror",
+    "Cute": "Cute",
+    "Retro": "Retro",
+    "Minimalist": "Minimalist",
+    "Surreal": "Surreal",
+    "3D Render": "3D Render",
+    "Cyberpunk": "Cyberpunk",
+    "Pixel Art": "Pixel Art",
+    "Other": "Other",
+    # 旧格式兼容 (AI 可能返回的变体)
+    "Landscape/Nature": "Landscape",
+    "Animals": "Nature",
+    "Architecture/Urban": "Architecture",
+    "Urban": "Architecture",
+    "Abstract Art": "Abstract",
+    "Sci-Fi/Futuristic": "Sci-Fi",
+    "Futuristic": "Sci-Fi",
+    "Fantasy/Magic": "Fantasy",
+    "Magic": "Fantasy",
+    "Anime/Cartoon": "Anime",
+    "Cartoon": "Anime",
+    "Realistic Photography": "Photography",
+    "Illustration/Painting": "Illustration",
+    "Painting": "Illustration",
+    "Fashion/Clothing": "Fashion",
+    "Clothing": "Fashion",
+    "Product/Commercial": "Product",
+    "Commercial": "Product",
+    "Horror/Dark": "Horror",
+    "Dark": "Horror",
+    "Cute/Kawaii": "Cute",
+    "Kawaii": "Cute",
+    "Vintage/Retro": "Retro",
+    "Vintage": "Retro",
+    # 旧系统分类兼容
+    "Clay / Felt": "Cute",
+    "Retro / Vintage": "Retro",
+    "3D": "3D Render",
+}
+
+
+def map_category(classification: dict) -> str:
+    """
+    将 AI 返回的分类映射到标准分类名
+
+    Args:
+        classification: AI 分类结果字典，包含 "category" 字段
+
+    Returns:
+        标准分类名
+    """
+    raw_category = classification.get("category", "Other")
+
+    # 直接匹配
+    if raw_category in CATEGORY_MAP:
+        return CATEGORY_MAP[raw_category]
+
+    # 模糊匹配 (大小写不敏感)
+    raw_lower = raw_category.lower()
+    for key, value in CATEGORY_MAP.items():
+        if key.lower() == raw_lower:
+            return value
+        if key.lower() in raw_lower or raw_lower in key.lower():
+            return value
+
+    # 验证是否是有效分类
+    if raw_category in VALID_CATEGORIES:
+        return raw_category
+
+    # 默认返回 Illustration
+    return "Illustration"
+
+
+# 统一标签到分类映射表
+# 用于从 tags 推断分类，所有导入脚本共用
+TAG_TO_CATEGORY = {
+    # 人像
+    "portrait": "Portrait",
+    "character": "Portrait",
+    "face": "Portrait",
+    "headshot": "Portrait",
+    "selfie": "Portrait",
+    "person": "Portrait",
+    # 风景
+    "landscape": "Landscape",
+    "scenery": "Landscape",
+    "outdoor": "Landscape",
+    "mountain": "Landscape",
+    "beach": "Landscape",
+    "sunset": "Landscape",
+    # 自然/动物
+    "nature": "Nature",
+    "animal": "Nature",
+    "animals": "Nature",
+    "wildlife": "Nature",
+    "pet": "Nature",
+    "cat": "Nature",
+    "dog": "Nature",
+    "bird": "Nature",
+    "flower": "Nature",
+    "plant": "Nature",
+    "forest": "Nature",
+    # 建筑
+    "architecture": "Architecture",
+    "building": "Architecture",
+    "city": "Architecture",
+    "urban": "Architecture",
+    "interior": "Architecture",
+    "house": "Architecture",
+    "room": "Architecture",
+    # 抽象
+    "abstract": "Abstract",
+    "pattern": "Abstract",
+    "geometric": "Abstract",
+    # 科幻
+    "sci-fi": "Sci-Fi",
+    "scifi": "Sci-Fi",
+    "futuristic": "Sci-Fi",
+    "space": "Sci-Fi",
+    "robot": "Sci-Fi",
+    "spaceship": "Sci-Fi",
+    "alien": "Sci-Fi",
+    "gaming": "Sci-Fi",
+    # 奇幻
+    "fantasy": "Fantasy",
+    "magic": "Fantasy",
+    "dragon": "Fantasy",
+    "fairy": "Fantasy",
+    "wizard": "Fantasy",
+    "medieval": "Fantasy",
+    "mythical": "Fantasy",
+    # 动漫
+    "anime": "Anime",
+    "cartoon": "Anime",
+    "manga": "Anime",
+    "comic": "Anime",
+    "chibi": "Anime",
+    # 摄影
+    "photography": "Photography",
+    "photo": "Photography",
+    "realistic": "Photography",
+    "photorealistic": "Photography",
+    "real": "Photography",
+    # 插画
+    "illustration": "Illustration",
+    "painting": "Illustration",
+    "artwork": "Illustration",
+    "drawing": "Illustration",
+    "art": "Illustration",
+    "infographic": "Illustration",
+    "typography": "Illustration",
+    "watercolor": "Illustration",
+    "oil-painting": "Illustration",
+    # 时尚
+    "fashion": "Fashion",
+    "clothing": "Fashion",
+    "outfit": "Fashion",
+    "model": "Fashion",
+    "dress": "Fashion",
+    # 食物
+    "food": "Food",
+    "cuisine": "Food",
+    "dish": "Food",
+    "cooking": "Food",
+    # 产品
+    "product": "Product",
+    "commercial": "Product",
+    "advertisement": "Product",
+    "vehicle": "Product",
+    "car": "Product",
+    "logo": "Product",
+    # 电影感
+    "cinematic": "Cinematic",
+    "movie": "Cinematic",
+    "film": "Cinematic",
+    "dramatic": "Cinematic",
+    # 恐怖
+    "horror": "Horror",
+    "dark": "Horror",
+    "creepy": "Horror",
+    "scary": "Horror",
+    "gothic": "Horror",
+    "zombie": "Horror",
+    # 可爱
+    "cute": "Cute",
+    "kawaii": "Cute",
+    "adorable": "Cute",
+    "paper-craft": "Cute",
+    "clay": "Cute",
+    "felt": "Cute",
+    "plush": "Cute",
+    # 复古
+    "retro": "Retro",
+    "vintage": "Retro",
+    "nostalgic": "Retro",
+    "80s": "Retro",
+    "90s": "Retro",
+    "classic": "Retro",
+    # 极简
+    "minimalist": "Minimalist",
+    "minimal": "Minimalist",
+    "simple": "Minimalist",
+    "clean": "Minimalist",
+    # 超现实
+    "surreal": "Surreal",
+    "surrealism": "Surreal",
+    "dreamlike": "Surreal",
+    "dream": "Surreal",
+    # 3D渲染
+    "3d": "3D Render",
+    "3d render": "3D Render",
+    "3d-render": "3D Render",
+    "render": "3D Render",
+    "blender": "3D Render",
+    "cgi": "3D Render",
+    # 赛博朋克
+    "cyberpunk": "Cyberpunk",
+    "neon": "Cyberpunk",
+    "cyber": "Cyberpunk",
+    # 像素艺术
+    "pixel": "Pixel Art",
+    "pixel art": "Pixel Art",
+    "pixel-art": "Pixel Art",
+    "pixelart": "Pixel Art",
+    "8-bit": "Pixel Art",
+    "8bit": "Pixel Art",
+    "16-bit": "Pixel Art",
+    "16bit": "Pixel Art",
+    # 其他
+    "creative": "Other",
+    "other": "Other",
+}
+
+
+def infer_category_from_tags(tags: list) -> str:
+    """
+    从标签列表推断分类
+
+    Args:
+        tags: 标签列表，如 ["portrait", "fashion", "realistic"]
+
+    Returns:
+        推断的分类名，如 "Portrait"
+    """
+    if not tags:
+        return "Other"
+
+    for tag in tags:
+        if not isinstance(tag, str):
+            continue
+        tag_lower = tag.lower().strip()
+        if tag_lower in TAG_TO_CATEGORY:
+            return TAG_TO_CATEGORY[tag_lower]
+
+    return "Illustration"
 
 
 def classify_prompt(prompt: str, model: str = DEFAULT_MODEL) -> dict:

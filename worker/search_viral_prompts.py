@@ -215,50 +215,8 @@ def mark_tweet_processed(state: Dict, tweet_id: str):
 
 # ========== 分类映射 ==========
 
-CATEGORY_MAP = {
-    "Portrait": "Portrait",
-    "Landscape/Nature": "Landscape",
-    "Landscape": "Landscape",
-    "Nature": "Nature",
-    "Animals": "Nature",
-    "Architecture/Urban": "Architecture",
-    "Architecture": "Architecture",
-    "Abstract Art": "Abstract",
-    "Abstract": "Abstract",
-    "Sci-Fi/Futuristic": "Sci-Fi",
-    "Sci-Fi": "Sci-Fi",
-    "Fantasy/Magic": "Fantasy",
-    "Fantasy": "Fantasy",
-    "Anime/Cartoon": "Anime",
-    "Anime": "Anime",
-    "Realistic Photography": "Photography",
-    "Photography": "Photography",
-    "Illustration/Painting": "Illustration",
-    "Illustration": "Illustration",
-    "Fashion/Clothing": "Fashion",
-    "Fashion": "Fashion",
-    "Food": "Food",
-    "Product/Commercial": "Product",
-    "Product": "Product",
-    "Cinematic": "Cinematic",
-    "Horror/Dark": "Cinematic",
-    "Cute/Kawaii": "Clay / Felt",
-    "Vintage/Retro": "Retro / Vintage",
-    "Minimalist": "Minimalist",
-    "Surreal": "Abstract",
-    "Other": "Other",
-}
-
-
-def map_category(classification: Dict) -> str:
-    raw_category = classification.get("category", "Other")
-    if raw_category in CATEGORY_MAP:
-        return CATEGORY_MAP[raw_category]
-    raw_lower = raw_category.lower()
-    for key, value in CATEGORY_MAP.items():
-        if key.lower() in raw_lower or raw_lower in key.lower():
-            return value
-    return "Photography"
+# 导入统一分类映射 (定义在 prompt_utils.py)
+from prompt_utils import CATEGORY_MAP, map_category
 
 
 # ========== twikit 搜索 ==========

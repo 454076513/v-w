@@ -296,36 +296,9 @@ def clear_progress():
         print("🗑️ 已清除处理进度")
 
 
-def infer_category_from_tags(tags: List[str]) -> str:
-    """从 tags 推断分类"""
-    if not tags:
-        return "Other"
-
-    # 简单的标签到分类映射
-    tag_to_category = {
-        "portrait": "Portrait",
-        "landscape": "Landscape",
-        "nature": "Nature",
-        "architecture": "Architecture",
-        "abstract": "Abstract",
-        "anime": "Anime",
-        "cartoon": "Anime",
-        "photography": "Photography",
-        "illustration": "Illustration",
-        "fashion": "Fashion",
-        "food": "Food",
-        "product": "Product",
-        "3d": "3D Render",
-        "cyberpunk": "Cyberpunk",
-        "fantasy": "Fantasy",
-    }
-
-    for tag in tags:
-        tag_lower = tag.lower()
-        if tag_lower in tag_to_category:
-            return tag_to_category[tag_lower]
-
-    return "Illustration"
+# 分类由 process_tweet_for_import 统一处理
+# 如需从 tags 推断分类，可从 prompt_utils 导入:
+# from prompt_utils import TAG_TO_CATEGORY, infer_category_from_tags
 
 
 def save_failed_twitter_items(failed_twitter_items: List[Dict], timestamp: str):

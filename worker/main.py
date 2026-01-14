@@ -311,79 +311,11 @@ def fetch_emails(mail: imaplib.IMAP4_SSL) -> List[Dict[str, Any]]:
 
 # ========== 分类映射 ==========
 
-# 系统支持的分类列表
-SYSTEM_CATEGORIES = [
-    "Portrait", "Landscape", "Nature", "Architecture", "Abstract",
-    "Sci-Fi", "Fantasy", "Anime", "Photography", "Illustration",
-    "Fashion", "Food", "Product", "Cinematic", "Clay / Felt",
-    "Retro / Vintage", "Minimalist", "Other"
-]
+# 导入统一分类映射 (定义在 prompt_utils.py)
+from prompt_utils import VALID_CATEGORIES, CATEGORY_MAP, map_category
 
-def map_category(classification: Dict) -> str:
-    """将 AI 分类映射到系统分类"""
-    # 映射表：AI 返回的分类 -> 系统分类
-    category_map = {
-        # 英文分类（新格式）
-        "Portrait": "Portrait",
-        "Landscape/Nature": "Landscape",
-        "Landscape": "Landscape",
-        "Nature": "Nature",
-        "Animals": "Nature",
-        "Architecture/Urban": "Architecture",
-        "Architecture": "Architecture",
-        "Urban": "Architecture",
-        "Abstract Art": "Abstract",
-        "Abstract": "Abstract",
-        "Sci-Fi/Futuristic": "Sci-Fi",
-        "Sci-Fi": "Sci-Fi",
-        "Futuristic": "Sci-Fi",
-        "Fantasy/Magic": "Fantasy",
-        "Fantasy": "Fantasy",
-        "Magic": "Fantasy",
-        "Anime/Cartoon": "Anime",
-        "Anime": "Anime",
-        "Cartoon": "Anime",
-        "Realistic Photography": "Photography",
-        "Photography": "Photography",
-        "Illustration/Painting": "Illustration",
-        "Illustration": "Illustration",
-        "Painting": "Illustration",
-        "Fashion/Clothing": "Fashion",
-        "Fashion": "Fashion",
-        "Clothing": "Fashion",
-        "Food": "Food",
-        "Product/Commercial": "Product",
-        "Product": "Product",
-        "Commercial": "Product",
-        "Horror/Dark": "Cinematic",
-        "Horror": "Cinematic",
-        "Dark": "Cinematic",
-        "Cinematic": "Cinematic",
-        "Cute/Kawaii": "Clay / Felt",
-        "Cute": "Clay / Felt",
-        "Kawaii": "Clay / Felt",
-        "Vintage/Retro": "Retro / Vintage",
-        "Vintage": "Retro / Vintage",
-        "Retro": "Retro / Vintage",
-        "Minimalist": "Minimalist",
-        "Surreal": "Abstract",
-        "Other": "Other",
-    }
-    
-    raw_category = classification.get("category", "Other")
-    
-    # 尝试直接匹配
-    if raw_category in category_map:
-        return category_map[raw_category]
-    
-    # 尝试部分匹配（大小写不敏感）
-    raw_lower = raw_category.lower()
-    for key, value in category_map.items():
-        if key.lower() in raw_lower or raw_lower in key.lower():
-            return value
-    
-    # 默认返回 Photography
-    return "Photography"
+# 系统支持的分类列表 (使用统一分类系统)
+SYSTEM_CATEGORIES = VALID_CATEGORIES
 
 
 # ========== 主流程 ==========
