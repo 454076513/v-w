@@ -548,6 +548,8 @@ IMPORTANT RULES (follow in this order):
    - No actual prompt exists in the text
    - Only a title/description exists (like "Nano Banana prompt") without the actual prompt
    - News, commentary, or tutorials without actual prompts
+   - **Questions** - text asking something rather than describing an image to generate
+   - **Discussion or commentary** about AI/images without actual generation prompts
 
 6. When extracting, return ONLY the prompt itself, without intro text like "这个提示词绝了"."""
         },
