@@ -511,40 +511,45 @@ def _extract_prompt_with_ai(text: str, model: str = DEFAULT_MODEL) -> str:
             "role": "system",
             "content": """You are a helpful assistant that extracts AI image generation prompts from text.
 
-IMPORTANT RULES:
-1. FIRST, check if this is an advertisement or promotional content. Signs of ads include:
-   - Product promotions, sales, discounts, deals
-   - Service promotions (courses, tools, subscriptions)
-   - Affiliate links, referral codes, promo codes
-   - "Buy now", "Limited time", "Sign up", "Join", "Subscribe"
-   - App/software promotions without actual prompts
-   - Giveaways that require following/retweeting
-   - Self-promotion of services or products
-   - Lists of AI tools or software recommendations (e.g., "Top 10 AI tools", "100+ AI Tools")
-   - Engagement bait: "Like", "Comment", "RT", "Retweet", "Follow me", "Must follow", "Bookmark this"
-   - Numbered lists of tool names or categories (e.g., "1. Research - ChatGPT, YouChat...")
-   If it's an advertisement or tool list, return 'Advertisement'.
+IMPORTANT RULES (follow in this order):
 
-2. Extract only the actual prompt itself, without any additional explanation or formatting.
-3. CRITICAL: Check if the prompt is NOT in the main post but in a reply/comment. Return 'Prompt in reply' if:
-   - Text ends with down arrow emoji: 👇 ⬇️ ↓ 🔽 ⤵️ (these mean "see below/in comments")
-   - Text says "prompt below", "check comment", "prompt in reply", "see thread"
-   - Text discusses a prompt (e.g., "This prompt works great!", "Try this prompt") but doesn't include the actual detailed prompt text
+1. FIRST, check if the text contains an ACTUAL AI image generation prompt. A real prompt usually contains:
+   - Detailed scene descriptions (subjects, actions, environments, compositions)
+   - Visual style specifications (lighting, colors, mood, atmosphere)
+   - Technical parameters (--ar, --v, --style, resolution, aspect ratio)
+   - Art style references (photorealistic, anime, oil painting, cinematic, etc.)
+   - JSON-formatted prompts with detailed settings (task_description, style, scene, etc.)
+
+   **If a real prompt exists, EXTRACT IT regardless of any promotional language around it.**
+   Many creators add casual commentary like "这个提示词绝了!", "Amazing prompt!", "Must try!"
+   before sharing real prompts - this is normal and NOT advertising.
+
+2. Only mark as 'Advertisement' if the post is PURELY promotional with NO actual prompt:
+   - Product/service sales without any prompt content
+   - Lists of AI tools or software (e.g., "Top 10 AI tools", "100+ AI Tools")
+   - Affiliate links, referral codes without prompts
+   - Giveaways that only require following/retweeting
+   - Numbered lists of tool names (e.g., "1. Research - ChatGPT, YouChat...")
+
+   **Key distinction**: A post saying "🔥This prompt is amazing! [detailed prompt...]" is NOT an ad.
+   A post saying "🔥Check out these 10 AI tools!" with no actual prompt IS an ad.
+
+3. Check if the prompt is in a reply/comment. Return 'Prompt in reply' ONLY if:
+   - Text ends with down arrow emoji AND contains no actual prompt after it
+   - Text says "prompt below/in comments" AND the actual prompt is not included
    - Text is short (under 200 chars) and talks ABOUT a prompt without containing one
-   When in doubt and the text ends with ⤵️ or similar arrows, return 'Prompt in reply'.
-4. If the text contains indicators like "Prompt in ALT", "see ALT", "check ALT", "ALT for prompt", or mentions that the prompt is in the image's alt text, return 'Prompt in ALT'.
-5. If the text only contains a title or description of what the image shows (like "Nano Banana prompt" or "Any person to Trash Pop Collage") but NOT the actual detailed prompt, return 'No prompt found'.
-6. A real AI image generation prompt usually contains:
-   - Detailed scene descriptions (subjects, actions, environments)
-   - Visual style specifications (lighting, colors, mood)
-   - Technical parameters (--ar, --v, --style, resolution)
-   - Art style references (photorealistic, anime, oil painting, etc.)
-7. The following are NOT prompts - return 'No prompt found':
-   - Lists of AI tools or software names
-   - News or commentary about AI
-   - Tutorials without actual prompts
-   - General discussions about image generation
-8. If no actual prompt is found, return 'No prompt found'."""
+   - Text has promotional intro but NO detailed prompt follows
+
+   **If the arrow emoji appears mid-text and a real prompt follows, extract the prompt.**
+
+4. Return 'Prompt in ALT' if text explicitly says the prompt is in image alt text.
+
+5. Return 'No prompt found' only if:
+   - No actual prompt exists in the text
+   - Only a title/description exists (like "Nano Banana prompt") without the actual prompt
+   - News, commentary, or tutorials without actual prompts
+
+6. When extracting, return ONLY the prompt itself, without intro text like "这个提示词绝了"."""
         },
         {
             "role": "user",
