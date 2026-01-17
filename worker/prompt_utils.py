@@ -141,19 +141,35 @@ def _call_pollinations_ai(messages: list, model: str = DEFAULT_MODEL) -> str:
             if isinstance(data, dict):
                 # OpenAI 格式: {"choices": [{"message": {"content": "..."}}]}
                 if "choices" in data:
-                    return data["choices"][0]["message"]["content"]
+                    message = data["choices"][0].get("message", {})
+                    # 优先返回 content，忽略 reasoning_content
+                    content = message.get("content")
+                    if content:
+                        return content
+                    # 如果只有 reasoning_content 没有 content，返回错误
+                    if message.get("reasoning_content") and not content:
+                        raise Exception("AI 返回了推理内容但没有实际答案")
+                    return ""
                 # 简化格式: {"content": "..."}
                 elif "content" in data:
                     return data["content"]
-                elif "reasoning_content" in data:
-                    return data["reasoning_content"]
+                # 检测消息对象格式: {"role": "assistant", "content": "..."}
+                elif "role" in data and data.get("role") == "assistant":
+                    content = data.get("content")
+                    if content:
+                        return content
+                    # 如果只有 reasoning_content，这是推理模型的问题
+                    if data.get("reasoning_content") and not content:
+                        raise Exception("AI 返回了推理内容但没有实际答案")
+                    return ""
+                # 注意: 不返回 reasoning_content，因为那是思考过程而非最终答案
                 else:
                     return json_module.dumps(data, ensure_ascii=False)
             elif isinstance(data, str):
                 return data
             else:
                 return json_module.dumps(data, ensure_ascii=False)
-        except:
+        except json_module.JSONDecodeError:
             # 纯文本响应
             return response.text.strip()
     else:
@@ -296,6 +312,119 @@ def _call_nvidia_ai(messages: list) -> str:
         raise Exception("NVIDIA API 返回空响应")
 
     return "".join(full_content)
+
+
+# ========== 辅助函数 ==========
+
+def _is_chain_of_thought(text: str) -> bool:
+    """
+    检测文本是否是 AI 的思考链/推理过程（而非实际提取的 prompt）
+
+    一些 AI 模型（如 DeepSeek）会返回思考过程而非直接答案
+
+    Args:
+        text: AI 返回的文本
+
+    Returns:
+        True 如果看起来像是思考链
+    """
+    if not text or len(text) < 50:
+        return False
+
+    text_lower = text.lower()
+
+    # 检测 JSON 包裹的推理内容
+    # 例如: {"role": "assistant", "reasoning_content": "..."}
+    if text.strip().startswith('{') and 'reasoning_content' in text_lower:
+        return True
+
+    # 思考链常见模式
+    cot_patterns = [
+        # 分析/计划性语句
+        "we need to",
+        "i need to",
+        "let me",
+        "let's",
+        "first,",
+        "the text includes",
+        "the text contains",
+        "looking at",
+        "analyzing",
+        "i will",
+        "i should",
+        # 推理性语句
+        "so the output should",
+        "so the answer",
+        "therefore",
+        "this means",
+        "based on this",
+        "it says",
+        "the instruction says",
+        # 确认性语句
+        "check if",
+        "should we",
+        "should i",
+        "proceed",
+        "ensure",
+        # 中文思考链
+        "我需要",
+        "让我",
+        "首先",
+        "分析一下",
+        "根据",
+        "所以",
+        "因此",
+    ]
+
+    # 如果文本以这些模式开头，很可能是思考链
+    for pattern in cot_patterns:
+        if text_lower.startswith(pattern):
+            return True
+
+    # 计算思考链特征词的数量
+    cot_count = sum(1 for p in cot_patterns if p in text_lower)
+
+    # 如果包含多个思考链特征词，可能是思考链
+    if cot_count >= 3:
+        return True
+
+    return False
+
+
+def _extract_actual_content(text: str) -> str:
+    """
+    从可能包含思考链的文本中提取实际内容
+
+    Args:
+        text: 可能包含思考链的文本
+
+    Returns:
+        提取的实际内容（如果能提取），否则返回原文本
+    """
+    if not text:
+        return text
+
+    # 常见的分隔模式：思考链后面跟着实际输出
+    separators = [
+        "\n\n",  # 双换行分隔
+        "\nPrompt:",  # 明确的 Prompt 标签
+        "\n---\n",  # 分隔线
+        "```",  # 代码块
+    ]
+
+    # 尝试找到实际内容
+    for sep in separators:
+        if sep in text:
+            parts = text.split(sep, 1)
+            if len(parts) > 1:
+                # 检查后半部分是否更像是实际 prompt
+                second_part = parts[1].strip()
+                if second_part and len(second_part) > 30:
+                    # 如果后半部分不像思考链，使用它
+                    if not _is_chain_of_thought(second_part[:200]):
+                        return second_part
+
+    return text
 
 
 # ========== 提示词检测 ==========
@@ -511,6 +640,9 @@ def _extract_prompt_with_ai(text: str, model: str = DEFAULT_MODEL) -> str:
             "role": "system",
             "content": """You are a helpful assistant that extracts AI image generation prompts from text.
 
+CRITICAL: Output ONLY the extracted prompt or one of these exact values: "Prompt in reply", "Prompt in ALT", "No prompt found", "Advertisement".
+Do NOT explain your reasoning. Do NOT include phrases like "We need to", "The text includes", "Let me", etc.
+
 IMPORTANT RULES (follow in this order):
 
 1. FIRST, check if the text contains an ACTUAL AI image generation prompt. A real prompt usually contains:
@@ -559,7 +691,19 @@ IMPORTANT RULES (follow in this order):
         }
     ]
 
-    return call_ai(messages, model)
+    result = call_ai(messages, model)
+
+    # 检测并过滤思考链（chain-of-thought）响应
+    if result and _is_chain_of_thought(result):
+        print(f"      ⚠️ 检测到思考链响应，尝试提取实际内容...")
+        extracted = _extract_actual_content(result)
+        if extracted != result and not _is_chain_of_thought(extracted):
+            return extracted
+        # 如果无法提取实际内容，记录日志并返回错误
+        print(f"      ⚠️ 无法从思考链中提取实际 prompt")
+        return "No prompt found"
+
+    return result
 
 
 def extract_prompt_simple(text: str, model: str = DEFAULT_MODEL) -> str:
