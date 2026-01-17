@@ -21,6 +21,11 @@ on:
         required: false
         type: boolean
         default: false
+      min_likes:
+        description: "最低点赞数过滤 (默认: 30)"
+        required: false
+        type: number
+        default: 30
       reset:
         description: "重置进度从头开始"
         required: false
@@ -100,6 +105,13 @@ jobs:
             ARGS="$ARGS --dry-run"
           fi
 
+          # 最低点赞数过滤 (默认 30)
+          MIN_LIKES="${{ inputs.min_likes }}"
+          if [ -z "$MIN_LIKES" ]; then
+            MIN_LIKES="30"
+          fi
+          ARGS="$ARGS --min-likes $MIN_LIKES"
+
           if [ "${{ inputs.reset }}" == "true" ]; then
             ARGS="$ARGS --reset"
           fi
@@ -141,5 +153,6 @@ jobs:
           echo "### Parameters" >> $GITHUB_STEP_SUMMARY
           echo "- Pages: ${{ inputs.pages || '2' }}" >> $GITHUB_STEP_SUMMARY
           echo "- Limit: ${{ inputs.limit || 'unlimited' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Min likes: ${{ inputs.min_likes || '30' }}" >> $GITHUB_STEP_SUMMARY
           echo "- Dry run: ${{ inputs.dry_run }}" >> $GITHUB_STEP_SUMMARY
           echo "- Reset: ${{ inputs.reset }}" >> $GITHUB_STEP_SUMMARY
