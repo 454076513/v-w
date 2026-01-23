@@ -25,7 +25,7 @@ AIART.PICS 提示词导入脚本
 import os
 import sys
 import json
-import asyncio
+import re
 import argparse
 import requests
 from typing import Optional, List, Dict, Any
@@ -72,7 +72,6 @@ DEFAULT_MIN_RETWEETS = 0
 
 def extract_tweet_info(x_url: str) -> tuple:
     """从 X URL 提取 tweet_id 和 username"""
-    import re
     match = re.search(r'x\.com/([^/]+)/status/(\d+)', x_url)
     if match:
         return match.group(2), match.group(1)  # tweet_id, username
@@ -124,6 +123,22 @@ def fetch_prompts_from_api(limit: int = 50, offset: int = 0) -> List[Dict]:
     if response.status_code != 200:
         return []
     return response.json().get("prompts", [])
+
+
+def fetch_prompt_detail(prompt_id: str) -> Optional[Dict]:
+    """获取单个 prompt 的详细信息（包含 originUrl）"""
+    url = f"{BASE_URL}/api/prompts/{prompt_id}"
+    try:
+        response = requests.get(url, timeout=30)
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        if data.get("success"):
+            return data.get("data", {})
+        return None
+    except Exception as e:
+        print(f"   ⚠️ 获取详情失败: {e}")
+        return None
 
 
 def extract_data_from_api_item(item: Dict) -> Optional[Dict]:
@@ -220,10 +235,6 @@ def process_api_item(db: Database, api_data: Dict, dry_run: bool = False) -> Dic
     """
     处理 API 返回的单个条目
 
-    策略:
-    - 使用统一处理函数 process_tweet_for_import
-    - 图片: 必须从 Twitter 获取高清图
-
     返回: {"success": bool, "method": str, "error": str or None, "twitter_failed": bool}
     """
     x_url = api_data.get("x_url", "")
@@ -236,8 +247,7 @@ def process_api_item(db: Database, api_data: Dict, dry_run: bool = False) -> Dic
     if not raw_prompt:
         return {"success": False, "method": "skipped", "error": "No prompt", "twitter_failed": False}
 
-    # 使用统一处理函数
-    result = process_tweet_for_import(
+    return process_tweet_for_import(
         db=db,
         tweet_url=x_url,
         raw_text=raw_prompt,
@@ -247,13 +257,11 @@ def process_api_item(db: Database, api_data: Dict, dry_run: bool = False) -> Dic
         dry_run=dry_run
     )
 
-    return result
 
-
-async def run_import_async(limit: int = None, max_pages: int = None, dry_run: bool = False,
-                           resume: bool = True, reset_progress: bool = False,
-                           min_likes: int = DEFAULT_MIN_LIKES, min_retweets: int = DEFAULT_MIN_RETWEETS):
-    """异步导入流程 - 通过 API 获取数据"""
+def run_import(limit: int = None, max_pages: int = None, dry_run: bool = False,
+               resume: bool = True, reset_progress: bool = False,
+               min_likes: int = DEFAULT_MIN_LIKES, min_retweets: int = DEFAULT_MIN_RETWEETS):
+    """导入流程 - 通过 API 获取数据"""
     print("=" * 70)
     print("📦 AIART.PICS 导入 (API + Twitter)")
     print("=" * 70)
@@ -351,9 +359,16 @@ async def run_import_async(limit: int = None, max_pages: int = None, dry_run: bo
             if limit and processed_count >= limit:
                 break
 
+            # 获取详情（列表 API 没有 originUrl，需要单独获取）
+            detail = fetch_prompt_detail(item_id)
+            if not detail:
+                print(f"   ⏭️ 跳过: 无法获取详情 (id={item_id[:8]}...)")
+                continue
+
             # 提取数据
-            api_data = extract_data_from_api_item(item)
+            api_data = extract_data_from_api_item(detail)
             if not api_data:
+                print(f"   ⏭️ 跳过: 无 originUrl")
                 continue
 
             processed_count += 1
@@ -453,26 +468,6 @@ async def run_import_async(limit: int = None, max_pages: int = None, dry_run: bo
     db.close()
 
 
-def run_import(limit: int = None, max_pages: int = None, dry_run: bool = False,
-               resume: bool = True, reset_progress: bool = False,
-               min_likes: int = DEFAULT_MIN_LIKES, min_retweets: int = DEFAULT_MIN_RETWEETS):
-    """同步入口"""
-    # 使用 asyncio.run 运行异步函数
-    try:
-        asyncio.run(run_import_async(
-            limit=limit,
-            max_pages=max_pages,
-            dry_run=dry_run,
-            resume=resume,
-            reset_progress=reset_progress,
-            min_likes=min_likes,
-            min_retweets=min_retweets
-        ))
-    except KeyboardInterrupt:
-        print("\n\n⚠️ 用户中断，进度已保存")
-        sys.exit(0)
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="从 AIART.PICS 导入数据到数据库 (API)",
@@ -517,15 +512,19 @@ def main():
 
     args = parser.parse_args()
 
-    run_import(
-        limit=args.limit,
-        max_pages=args.pages,
-        dry_run=args.dry_run,
-        resume=not args.no_resume,
-        reset_progress=args.reset,
-        min_likes=args.min_likes,
-        min_retweets=args.min_retweets
-    )
+    try:
+        run_import(
+            limit=args.limit,
+            max_pages=args.pages,
+            dry_run=args.dry_run,
+            resume=not args.no_resume,
+            reset_progress=args.reset,
+            min_likes=args.min_likes,
+            min_retweets=args.min_retweets
+        )
+    except KeyboardInterrupt:
+        print("\n\n⚠️ 用户中断，进度已保存")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
