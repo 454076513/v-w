@@ -84,6 +84,8 @@ jobs:
       - name: Run import
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          GITEE_AI_API_KEY: ${{ secrets.GITEE_AI_API_KEY }}
         run: |
           cd worker
 

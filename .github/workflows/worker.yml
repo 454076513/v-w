@@ -47,6 +47,7 @@ jobs:
           GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
           GMAIL_SENDER_FILTER: ${{ secrets.GMAIL_SENDER_FILTER || 'grok' }}
           AI_MODEL: ${{ secrets.AI_MODEL || 'openai' }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           GITEE_AI_API_KEY: ${{ secrets.GITEE_AI_API_KEY }}
         run: |
           cd worker

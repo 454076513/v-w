@@ -48,22 +48,22 @@ except ImportError:
 POLLINATIONS_API_URL = "https://text.pollinations.ai/"
 DEFAULT_MODEL = "openai"
 
-# Gitee AI API 配置 (fallback 1)
+# NVIDIA API 配置 (fallback 1)
+NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+NVIDIA_MODEL = "deepseek-ai/deepseek-v3.2"
+NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY", "")
+
+# Gitee AI API 配置 (fallback 2)
 GITEE_AI_API_URL = "https://ai.gitee.com/v1/chat/completions"
 GITEE_AI_MODEL = "DeepSeek-V3"
 GITEE_AI_API_KEY = os.environ.get("GITEE_AI_API_KEY", "")
-
-# NVIDIA API 配置 (fallback 2)
-NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-NVIDIA_MODEL = "deepseek-ai/deepseek-v3.2"
-NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY", "mHMcKtSCRsFEXQ2gyipZS6bn1aU01szMrkCRORruRFvtbCCwmjqeO")
 
 
 # ========== AI 调用 ==========
 
 def call_ai(messages: list, model: str = DEFAULT_MODEL) -> str:
     """
-    调用 AI API，依次尝试 Pollinations -> Gitee AI -> NVIDIA API
+    调用 AI API，依次尝试 Pollinations -> NVIDIA -> Gitee AI
 
     Args:
         messages: OpenAI 格式的消息列表
@@ -82,20 +82,7 @@ def call_ai(messages: list, model: str = DEFAULT_MODEL) -> str:
         print(f"⚠️ Pollinations AI 失败: {pollinations_error}")
         errors.append(f"Pollinations ({pollinations_error})")
 
-    # Fallback 1: Gitee AI
-    if GITEE_AI_API_KEY:
-        print(f"🔄 尝试 Gitee AI (DeepSeek-V3) 作为 fallback...")
-        try:
-            result = _call_gitee_ai(messages)
-            print("✓ Gitee AI 调用成功")
-            return result
-        except Exception as gitee_error:
-            print(f"✗ Gitee AI 也失败: {gitee_error}")
-            errors.append(f"Gitee ({gitee_error})")
-    else:
-        print("⚠️ GITEE_AI_API_KEY 未设置，跳过 Gitee AI")
-
-    # Fallback 2: NVIDIA API
+    # Fallback 1: NVIDIA API
     if NVIDIA_API_KEY:
         print(f"🔄 尝试 NVIDIA API (DeepSeek-V3.2) 作为 fallback...")
         try:
@@ -107,6 +94,19 @@ def call_ai(messages: list, model: str = DEFAULT_MODEL) -> str:
             errors.append(f"NVIDIA ({nvidia_error})")
     else:
         print("⚠️ NVIDIA_API_KEY 未设置，跳过 NVIDIA API")
+
+    # Fallback 2: Gitee AI
+    if GITEE_AI_API_KEY:
+        print(f"🔄 尝试 Gitee AI (DeepSeek-V3) 作为 fallback...")
+        try:
+            result = _call_gitee_ai(messages)
+            print("✓ Gitee AI 调用成功")
+            return result
+        except Exception as gitee_error:
+            print(f"✗ Gitee AI 也失败: {gitee_error}")
+            errors.append(f"Gitee ({gitee_error})")
+    else:
+        print("⚠️ GITEE_AI_API_KEY 未设置，跳过 Gitee AI")
 
     # 所有服务都失败
     raise Exception(f"所有 AI 服务都失败: {', '.join(errors)}")

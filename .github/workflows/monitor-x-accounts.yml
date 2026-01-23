@@ -64,6 +64,7 @@ jobs:
         if: github.event_name == 'schedule'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           GITEE_AI_API_KEY: ${{ secrets.GITEE_AI_API_KEY }}
           X_COOKIE: ${{ secrets.X_COOKIE }}
         run: |
@@ -74,6 +75,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           GITEE_AI_API_KEY: ${{ secrets.GITEE_AI_API_KEY }}
           X_COOKIE: ${{ secrets.X_COOKIE }}
         run: |
