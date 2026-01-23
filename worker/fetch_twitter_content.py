@@ -10,12 +10,16 @@ Twitter/X Content Fetcher
     python fetch_twitter_content.py https://x.com/oggii_0/status/2001232399368380637
 """
 
-import re
-import sys
+import argparse
+import json
 import os
-import requests
-from urllib.parse import urlparse
+import re
+import subprocess
+import sys
+from datetime import datetime
 from pathlib import Path
+
+import requests
 
 # 加载环境变量
 try:
@@ -92,8 +96,6 @@ def extract_prompt_with_ai(text: str, model: str = DEFAULT_MODEL) -> str:
     return "No prompt found"
 
 # Twitter Cookies 配置 (用于获取评论)
-import json
-
 COOKIES_FILE = Path(__file__).parent / "x_cookies.json"
 X_COOKIE = os.environ.get("X_COOKIE", "")  # JSON 字符串: '{"auth_token": "xxx", "ct0": "xxx"}'
 
@@ -130,8 +132,6 @@ def fetch_author_replies(tweet_id: str, author_username: str) -> list:
     Returns:
         作者回复列表，每个元素包含 {"text": "...", "is_author": True}
     """
-    import subprocess
-
     # 检查 cookies 是否存在
     cookies = _load_twitter_cookies()
     if not cookies:
@@ -494,8 +494,6 @@ def fetch_tweet(url: str, download_images: bool = True, output_dir: str = ".",
             - extracted_prompt: 提取的 prompt (仅当 extract_prompt=True)
             - ...
     """
-    from datetime import datetime
-    
     start_time = datetime.now()
     
     # 解析 URL
@@ -888,8 +886,6 @@ def fetch_tweet(url: str, download_images: bool = True, output_dir: str = ".",
 
 
 def main():
-    import argparse
-    
     parser = argparse.ArgumentParser(
         description="Twitter/X 内容获取工具 - 获取推文正文、图片和互动统计",
         formatter_class=argparse.RawDescriptionHelpFormatter,

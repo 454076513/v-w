@@ -17,10 +17,15 @@ Prompt Utils - 提示词提取和分类工具
     classification = classify_prompt(prompt, model="openai")
 """
 
-import re
+import json
 import os
-import requests
+import re
+import subprocess
+import sys
 from pathlib import Path
+from typing import Optional
+
+import requests
 
 # 加载环境变量
 try:
@@ -118,8 +123,6 @@ def _call_pollinations_ai(messages: list, model: str = DEFAULT_MODEL) -> str:
     Returns:
         AI 响应内容
     """
-    import json as json_module
-
     # 确保 model 不为空
     if not model or not model.strip():
         model = DEFAULT_MODEL
@@ -164,12 +167,12 @@ def _call_pollinations_ai(messages: list, model: str = DEFAULT_MODEL) -> str:
                     return ""
                 # 注意: 不返回 reasoning_content，因为那是思考过程而非最终答案
                 else:
-                    return json_module.dumps(data, ensure_ascii=False)
+                    return json.dumps(data, ensure_ascii=False)
             elif isinstance(data, str):
                 return data
             else:
-                return json_module.dumps(data, ensure_ascii=False)
-        except json_module.JSONDecodeError:
+                return json.dumps(data, ensure_ascii=False)
+        except json.JSONDecodeError:
             # 纯文本响应
             return response.text.strip()
     else:
@@ -186,8 +189,6 @@ def _call_gitee_ai(messages: list) -> str:
     Returns:
         AI 响应内容
     """
-    import json
-
     if not GITEE_AI_API_KEY:
         raise Exception("GITEE_AI_API_KEY 环境变量未设置")
 
@@ -255,8 +256,6 @@ def _call_nvidia_ai(messages: list) -> str:
     Returns:
         AI 响应内容
     """
-    import json
-
     if not NVIDIA_API_KEY:
         raise Exception("NVIDIA_API_KEY 环境变量未设置")
 
@@ -1077,8 +1076,6 @@ def classify_prompt(prompt: str, model: str = DEFAULT_MODEL) -> dict:
             "reason": "原因"
         }
     """
-    import json
-
     categories_str = "\n".join([f"- {cat}" for cat in PROMPT_CATEGORIES])
 
     messages = [
@@ -1310,10 +1307,6 @@ def fetch_author_replies(tweet_id: str, author_username: str) -> list:
     Returns:
         作者回复列表，每个元素包含 {"text": "...", "is_author": True}
     """
-    import subprocess
-    import json
-    import sys
-
     # 检查 cookies 是否存在
     cookies_file = Path(__file__).parent / "x_cookies.json"
     x_cookie_env = os.environ.get("X_COOKIE", "")
@@ -1523,14 +1516,12 @@ def extract_prompt_with_replies(
 
 def extract_tweet_id(url: str) -> str:
     """从 Twitter URL 提取 tweet ID"""
-    import re
     match = re.search(r'/status/(\d+)', url)
     return match.group(1) if match else ""
 
 
 def extract_username(url: str) -> str:
     """从 Twitter URL 提取用户名"""
-    import re
     match = re.search(r'(?:twitter\.com|x\.com)/([^/]+)/status', url)
     return match.group(1) if match else ""
 

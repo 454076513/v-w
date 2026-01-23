@@ -33,13 +33,17 @@ X/Twitter 爆款提示词搜索器
     X_PASSWORD          - X 账号密码
 """
 
-import os
-import sys
+import argparse
 import asyncio
 import json
-from datetime import datetime, timezone
+import os
+import sys
+import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Dict, List, Optional
+
+from dateutil import parser as date_parser
 
 # 加载环境变量
 try:
@@ -243,7 +247,6 @@ class TwikitSearcher:
         # 尝试使用 cookies 登录 (优先使用环境变量)
         if X_COOKIE:
             try:
-                import tempfile
                 cookie_data = json.loads(X_COOKIE)
                 # 写入临时文件供 twikit 加载
                 with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
@@ -329,7 +332,6 @@ class TwikitSearcher:
 
         # 添加时间过滤 - 只搜索最近 N 天
         if days_back > 0:
-            from datetime import timedelta
             since_date = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
             query_parts.append(f"since:{since_date}")
 
@@ -439,8 +441,6 @@ async def process_tweet(db: Database, tweet: Dict, state: Dict,
     # 检查推文时间是否在指定小时内
     if hours_back > 0 and created_at:
         try:
-            from datetime import timedelta
-            from dateutil import parser as date_parser
             tweet_time = date_parser.parse(created_at)
             if tweet_time.tzinfo is None:
                 tweet_time = tweet_time.replace(tzinfo=timezone.utc)
@@ -650,8 +650,6 @@ async def run_continuous(
 # ========== CLI ==========
 
 def main():
-    import argparse
-
     parser = argparse.ArgumentParser(
         description="Search viral AI prompts on X/Twitter using twikit",
         formatter_class=argparse.RawDescriptionHelpFormatter,

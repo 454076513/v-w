@@ -16,13 +16,13 @@
   python import_aiart_x_urls.py --reset            # 重置进度
 """
 
+import argparse
+import json
 import os
 import sys
-import json
-import argparse
-from typing import Optional, Dict, Any
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 # 加载环境变量
 try:

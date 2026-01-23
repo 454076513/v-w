@@ -35,15 +35,18 @@ X/Twitter AI Art Account Monitor
     X_PASSWORD          - X 账号密码
 """
 
-import os
-import sys
+import argparse
 import asyncio
 import json
+import os
 import random
+import re
+import sys
+import tempfile
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
 
 # 加载环境变量
 try:
@@ -748,8 +751,6 @@ def fetch_user_timeline_nitter(username: str, count: int = 20) -> List[Dict]:
 
 def parse_nitter_rss(xml_content: str, username: str, count: int = 20) -> List[Dict]:
     """解析 Nitter RSS 内容"""
-    import re
-
     tweets = []
 
     if not HAS_BS4:
@@ -818,8 +819,6 @@ def fetch_user_timeline_syndication(username: str, count: int = 20) -> List[Dict
     使用 Twitter Syndication API 获取用户时间线
     这是 Twitter 官方的嵌入 API，不需要认证
     """
-    import re
-
     tweets = []
 
     # Twitter Syndication Timeline API
@@ -877,8 +876,6 @@ def fetch_user_timeline_rsshub(username: str, count: int = 20) -> List[Dict]:
     Returns:
         推文列表 (只包含 tweet_id，需要后续获取详情)
     """
-    import re
-
     tweets = []
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -1036,7 +1033,6 @@ class XMonitor:
         # 尝试使用 cookies 登录 (优先使用环境变量)
         if x_cookie:
             try:
-                import tempfile
                 # 支持多种格式
                 cookie_str = x_cookie.strip()
                 # 如果是单引号包裹，转换为双引号
@@ -1458,8 +1454,6 @@ async def run_continuous(
 # ========== CLI ==========
 
 def main():
-    import argparse
-
     parser = argparse.ArgumentParser(
         description="X/Twitter AI Art Account Monitor (使用 twikit + cookies 认证)",
         formatter_class=argparse.RawDescriptionHelpFormatter,

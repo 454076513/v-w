@@ -17,16 +17,17 @@ Muse Worker - 一体化邮件监听 + Twitter 抓取 + 数据库写入
   AI_MODEL            - AI 模型 (默认: openai)
 """
 
-import os
-import sys
-import re
-import imaplib
+import argparse
 import email
+import imaplib
+import os
+import re
+import sys
+from datetime import datetime, timezone
 from email.header import decode_header
 from email.message import Message
 from email.utils import parsedate_to_datetime
-from typing import Optional, List, Dict, Any
-from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 # 尝试加载 .env.local
 try:
@@ -47,7 +48,7 @@ except ImportError:
     pass
 
 # 导入 Twitter 抓取模块
-from fetch_twitter_content import fetch_tweet, extract_tweet_id, extract_username
+from fetch_twitter_content import fetch_tweet
 
 # 导入统一处理函数
 from prompt_utils import process_tweet_for_import
@@ -55,7 +56,7 @@ from prompt_utils import process_tweet_for_import
 # 数据库连接
 try:
     import psycopg2
-    from psycopg2.extras import RealDictCursor, Json
+    from psycopg2.extras import RealDictCursor
 except ImportError:
     print("❌ 请安装 psycopg2: pip install psycopg2-binary")
     sys.exit(1)
@@ -307,15 +308,6 @@ def fetch_emails(mail: imaplib.IMAP4_SSL) -> List[Dict[str, Any]]:
     except Exception as e:
         print(f"❌ 获取邮件失败: {e}")
         return emails
-
-
-# ========== 分类映射 ==========
-
-# 导入统一分类映射 (定义在 prompt_utils.py)
-from prompt_utils import VALID_CATEGORIES, CATEGORY_MAP, map_category
-
-# 系统支持的分类列表 (使用统一分类系统)
-SYSTEM_CATEGORIES = VALID_CATEGORIES
 
 
 # ========== 主流程 ==========
@@ -590,8 +582,6 @@ def run_full_pipeline():
 
 
 def main():
-    import argparse
-    
     parser = argparse.ArgumentParser(
         description="Muse Worker - 邮件监听 + Twitter 抓取 + 数据库写入",
         formatter_class=argparse.RawDescriptionHelpFormatter,

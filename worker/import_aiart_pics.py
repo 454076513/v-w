@@ -22,15 +22,16 @@ AIART.PICS 提示词导入脚本
   python import_aiart_pics.py --reset            # 重置进度
 """
 
-import os
-import sys
-import json
-import re
 import argparse
-import requests
-from typing import Optional, List, Dict, Any
+import json
+import os
+import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import requests
 
 # 加载环境变量
 try:

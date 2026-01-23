@@ -4,12 +4,15 @@
 用于避免连接池问题
 """
 
-import sys
-import os
 import json
+import os
+import sys
 import time
-import requests
+import traceback
 from pathlib import Path
+from urllib.parse import urlencode
+
+import requests
 
 # 加载环境变量
 try:
@@ -44,8 +47,6 @@ def fetch_author_replies(tweet_id: str, author_username: str) -> list:
     """
     使用 Twitter GraphQL API 获取作者对自己帖子的回复
     """
-    import sys
-
     cookies = load_cookies()
     if not cookies:
         print("DEBUG: No cookies found", file=sys.stderr)
@@ -104,7 +105,6 @@ def fetch_author_replies(tweet_id: str, author_username: str) -> list:
         "responsive_web_enhance_cards_enabled": False
     }
 
-    from urllib.parse import urlencode
     params = {
         'variables': json.dumps(variables),
         'features': json.dumps(features),
@@ -177,15 +177,12 @@ def fetch_author_replies(tweet_id: str, author_username: str) -> list:
         return replies
 
     except Exception as e:
-        import traceback
         print(f"DEBUG: Exception in fetch_author_replies: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         return []
 
 
 if __name__ == "__main__":
-    import sys
-
     if len(sys.argv) < 3:
         print(json.dumps([]), file=sys.stdout)
         sys.exit(0)
